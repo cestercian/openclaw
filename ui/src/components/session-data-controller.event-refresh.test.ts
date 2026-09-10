@@ -103,8 +103,14 @@ function createFilteredSessionController(
       return () => eventListeners.delete(listener);
     },
   } as const;
-  const sessions = createSessionCapability(gateway);
   let selectedAgentId = "main";
+  const agentSelection = {
+    get state() {
+      return { selectedId: selectedAgentId, scopeId: selectedAgentId };
+    },
+    subscribe: () => () => undefined,
+  };
+  const sessions = createSessionCapability(gateway, agentSelection);
   let selectedStatusFilter = statusFilter;
   let membership = { ownerId: null as string | null, involvingMe: false };
   const agentsState = {
@@ -126,16 +132,13 @@ function createFilteredSessionController(
         return () => agentListeners.delete(listener);
       },
     },
-    agentSelection: {
-      get state() {
-        return { selectedId: selectedAgentId, scopeId: selectedAgentId };
-      },
-      subscribe: () => () => undefined,
-    },
+    agentSelection,
   } as unknown as ApplicationContext;
   const host = {
     isConnected: true,
     connected: true,
+    activeRouteId: "sessions",
+    getRouteSessionKey: () => context.gateway.snapshot.sessionKey.trim(),
     sessionDataContext: context,
     addController: () => undefined,
     removeController: () => undefined,

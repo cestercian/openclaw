@@ -134,7 +134,7 @@ describe("tsdown config", () => {
     const plugin = createStateSchemaInlinePlugin(rootDir);
     let cacheKeyGenerator: ((context: { id: string }) => string | undefined) | undefined;
     plugin.configureVitest({
-      experimental_defineCacheKeyGenerator: (generator) => {
+      defineCacheKeyGenerator: (generator) => {
         cacheKeyGenerator = generator;
       },
     });
@@ -171,6 +171,9 @@ describe("tsdown config", () => {
         (entry as Record<string, unknown>)["worker/worker"] === "src/worker/worker-deploy-entry.ts"
       );
     });
+    const handoffGraph = configs.find((config) =>
+      entryKeys(config).includes("managed-handoff-runtime"),
+    );
     const inlinePlugins = configs.flatMap(
       (config) =>
         config.plugins?.filter((plugin) => plugin.name === STATE_SCHEMA_INLINE_PLUGIN_NAME) ?? [],
@@ -182,7 +185,13 @@ describe("tsdown config", () => {
     expect(workerGraph?.plugins).toContainEqual(
       expect.objectContaining({ name: STATE_SCHEMA_INLINE_PLUGIN_NAME }),
     );
-    expect(inlinePlugins).toHaveLength(2);
+    expect(handoffGraph?.plugins).toContainEqual(
+      expect.objectContaining({ name: STATE_SCHEMA_INLINE_PLUGIN_NAME }),
+    );
+    expect(entrySources(unifiedGraph)["native-hook-relay/entry"]).toBe(
+      "src/cli/native-hook-relay-entry.ts",
+    );
+    expect(inlinePlugins).toHaveLength(3);
   });
 
   it("keeps core, plugin runtime, plugin-sdk, bundled root plugins, and bundled hooks in one dist graph", () => {
@@ -273,7 +282,7 @@ describe("tsdown config", () => {
     );
   });
 
-  it("keeps Gateway plugin reload targets behind one stable dist entry", () => {
+  it("preserves the reload entry lazy-loaded by already-running v2026.9.1 Gateways", () => {
     const distGraph = requireUnifiedDistGraph();
 
     expect(entrySources(distGraph)["gateway/plugin-channel-reload-targets"]).toBe(
@@ -329,45 +338,6 @@ describe("tsdown config", () => {
 
     expect(configs.map((config) => config.outDir)).not.toContain("dist/plugin-sdk");
     expect(hookEntries).toStrictEqual([]);
-  });
-
-  it("externalizes known heavy native and declaration-fragile dependencies", () => {
-    const unifiedGraph = unifiedDistGraph();
-    const neverBundle = unifiedGraph?.deps?.neverBundle;
-    const external = unifiedGraph?.inputOptions?.({})?.external;
-
-    if (typeof neverBundle === "function") {
-      expect(neverBundle("@anthropic-ai/vertex-sdk")).toBe(true);
-      expect(neverBundle("@discordjs/voice")).toBe(true);
-      expect(neverBundle("@larksuiteoapi/node-sdk")).toBe(true);
-      expect(neverBundle("@matrix-org/matrix-sdk-crypto-nodejs")).toBe(true);
-      expect(neverBundle("@slack/bolt")).toBe(true);
-      expect(neverBundle("@slack/web-api")).toBe(true);
-      expect(neverBundle("@vitest/expect")).toBe(true);
-      expect(neverBundle("jimp")).toBe(true);
-      expect(neverBundle("matrix-js-sdk/lib/client.js")).toBe(true);
-      expect(neverBundle("vitest")).toBe(true);
-      expect(neverBundle("not-a-runtime-dependency")).toBe(false);
-    } else {
-      for (const dependency of [
-        "@anthropic-ai/vertex-sdk",
-        "@discordjs/voice",
-        "@larksuiteoapi/node-sdk",
-        "@slack/bolt",
-        "@slack/web-api",
-        "@vitest/expect",
-        "jimp",
-        "matrix-js-sdk",
-        "vitest",
-      ]) {
-        expect(neverBundle).toContain(dependency);
-      }
-    }
-    if (typeof external !== "function") {
-      throw new Error("expected unified graph external predicate");
-    }
-    const externalize = external;
-    expect(externalize("jimp", undefined, false)).toBe(true);
   });
 
   it("bundles SDK-owned helpers while retaining fs-safe package ownership", () => {

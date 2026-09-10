@@ -122,6 +122,7 @@ function applySessionModelSelectionToEntry(params: {
     entry: params.entry,
     currentProvider: params.currentProvider,
     selection: params.request,
+    explicitDefaultSelection: params.request.isDefault,
     profileOverride: params.request.profileOverride,
     markLiveSwitchPending: params.markLiveSwitchPending,
   });
@@ -181,7 +182,16 @@ export async function applySessionModelSelection(
   const prepared = await prepareModelSelectionRuntime({
     cfg: params.cfg,
     agentId: params.agentId,
-    sessionEntry: startingEntry,
+    workspaceDir: startingEntry.spawnedWorkspaceDir,
+    sessionEntry: request.profileOverride
+      ? {
+          ...startingEntry,
+          providerOverride: request.provider,
+          modelProvider: request.provider,
+          authProfileOverride: request.profileOverride,
+          authProfileOverrideSource: "user",
+        }
+      : startingEntry,
     provider: request.provider,
     model: request.model,
     catalog: params.thinkingCatalog ?? params.modelCatalog,
@@ -195,7 +205,9 @@ export async function applySessionModelSelection(
   if (prepared.status === "rejected") {
     return prepared;
   }
-  const authProfileError = params.validateAuthProfileSelection?.();
+  const validateSelection = () =>
+    params.validateAuthProfileSelection?.() ?? prepared.validateRuntimeSelection?.();
+  const authProfileError = validateSelection();
   if (authProfileError) {
     return { status: "rejected", reason: "not-allowed", message: authProfileError };
   }
@@ -276,7 +288,7 @@ export async function applySessionModelSelection(
       reassertLiveModelSwitchPending: applied.changed && nextEntry.liveModelSwitchPending === true,
       requireModelSelectionUnlocked: true,
       touchedFields: SESSION_MODEL_OVERRIDE_TRANSACTION_FIELDS,
-      validateCommit: params.validateAuthProfileSelection,
+      validateCommit: validateSelection,
     });
     if (persistence.entry) {
       params.sessionStore[params.sessionKey] = persistence.entry;
@@ -331,9 +343,9 @@ export async function applySessionModelSelection(
       ? persistStickyModelSelectionBestEffort({
           agentId: params.agentId,
           model: effectiveModelRef,
-          ...(params.stickyModelSelectionTarget
-            ? { target: params.stickyModelSelectionTarget }
-            : {}),
+          // The shipped SDK opt-in resolves its effective layer inside the config mutation.
+          // Ordinary chat callers supply an authorized target or leave persistence disabled.
+          target: params.stickyModelSelectionTarget ?? "effective",
         })
       : undefined;
   if (changed) {

@@ -8,6 +8,13 @@ const MIN_HEIGHT = 220;
 const MAX_WIDTH = 1_200;
 const MAX_HEIGHT = 800;
 
+function isPluginSlotId(value: unknown): value is `plugin:${string}/${string}` {
+  return (
+    typeof value === "string" &&
+    /^plugin:[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}\/[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/.test(value)
+  );
+}
+
 function normalizeSlotId(value: unknown): SidebarSlotId | null {
   // Stable releases persisted dashboard panels as `chat`; normalize that
   // storage contract here so upgrades retain the selected panel and layout.
@@ -23,7 +30,8 @@ function normalizeSlotId(value: unknown): SidebarSlotId | null {
     value === "discussion" ||
     value === "tasks" ||
     value === "terminal" ||
-    value === "workspace"
+    value === "workspace" ||
+    isPluginSlotId(value)
     ? value
     : null;
 }
@@ -151,5 +159,11 @@ export function normalizeSidebarLayout(value: unknown): SidebarLayout {
     dock: value.dock === "bottom" || value.dock === "left" ? value.dock : "right",
     open: typeof value.open === "boolean" ? value.open : columns.length > 0,
     expanded: value.expanded === true,
+    ...(value.expanded === true &&
+    value.expandedSide === true &&
+    value.open !== false &&
+    panels.some((panel) => panel.id === activePanelId && panel.id !== mainPanelId)
+      ? { expandedSide: true }
+      : {}),
   };
 }
