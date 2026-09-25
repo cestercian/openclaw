@@ -1,22 +1,25 @@
-// Feishu plugin module implements monitor.transport behavior.
 import crypto from "node:crypto";
 import * as http from "node:http";
 import * as Lark from "@larksuiteoapi/node-sdk";
 import { channelBlockedPatch, channelReadyPatch } from "openclaw/plugin-sdk/gateway-runtime";
+import { safeEqualSecret } from "openclaw/plugin-sdk/security-runtime";
 import { isRecord } from "openclaw/plugin-sdk/string-coerce-runtime";
 import { truncateUtf16Safe } from "openclaw/plugin-sdk/text-utility-runtime";
+import {
+  applyBasicWebhookRequestGuards,
+  resolveRequestClientIp,
+} from "openclaw/plugin-sdk/webhook-ingress";
+import {
+  createWebhookInFlightLimiter,
+  installRequestBodyLimitGuard,
+  readWebhookBodyOrReject,
+  sendHttpRequestRejection,
+} from "openclaw/plugin-sdk/webhook-request-guards";
+import type { RuntimeEnv } from "../runtime-api.js";
 import { waitForAbortableDelay } from "./async.js";
 import { createFeishuWSClient } from "./client.js";
 import type { FeishuWebhookInvoker } from "./feishu-ingress.js";
 import { buildFeishuWebhookRateLimitKey } from "./monitor-rate-limit-key.js";
-import {
-  applyBasicWebhookRequestGuards,
-  installRequestBodyLimitGuard,
-  readWebhookBodyOrReject,
-  resolveRequestClientIp,
-  safeEqualSecret,
-  type RuntimeEnv,
-} from "./monitor-transport-runtime-api.js";
 import type { FeishuStatusSink } from "./monitor.js";
 import {
   clearFeishuBotIdentityState,
@@ -49,6 +52,7 @@ type MonitorTransportParams = {
 
 const FEISHU_WEBHOOK_ACCEPTED_HEADER = "x-openclaw-delivery-accepted";
 const FEISHU_WEBHOOK_ACCEPTED_VALUE = "durable";
+const FEISHU_PRE_AUTH_MAX_IN_FLIGHT = 64;
 // Feishu signs each delivery at send time, so a captured signed callback stays
 // validly signed forever. Reject deliveries whose signed timestamp is too far
 // from the local clock: generous enough for provider retries and host clock
@@ -61,10 +65,6 @@ const FEISHU_WS_LOG_ERROR_MAX_LENGTH = 500;
 const FEISHU_WS_RECONNECT_EXHAUSTED_RE = /^WebSocket reconnect exhausted after \d+ attempts?/;
 const FEISHU_WS_AUTORECONNECT_DISABLED_ERROR =
   "WebSocket connect failed and autoReconnect is disabled";
-
-function isFeishuWebhookPayload(value: unknown): value is Record<string, unknown> {
-  return isRecord(value);
-}
 
 const BLOCKED_FEISHU_WEBHOOK_PAYLOAD_KEYS = new Set([
   "__proto__",
@@ -91,7 +91,7 @@ function buildFeishuWebhookEnvelope(
 function parseFeishuWebhookPayload(rawBody: string): Record<string, unknown> | null {
   try {
     const parsed = JSON.parse(rawBody) as unknown;
-    return isFeishuWebhookPayload(parsed) ? parsed : null;
+    return isRecord(parsed) ? parsed : null;
   } catch {
     return null;
   }
@@ -400,6 +400,11 @@ export async function monitorWebhook({
     );
   }
   const host = account.config.webhookHost ?? "127.0.0.1";
+  const preAuthInFlightLimiter = createWebhookInFlightLimiter({
+    maxInFlightPerKey: FEISHU_PRE_AUTH_MAX_IN_FLIGHT,
+    maxTrackedKeys: 1,
+  });
+  const preAuthInFlightKey = `${accountId}:${path}`;
 
   log(`feishu[${accountId}]: starting Webhook server on ${host}:${port}, path ${path}...`);
 
@@ -454,42 +459,66 @@ export async function monitorWebhook({
       return;
     }
 
+    // Feishu signature validation needs the complete raw body; bound incomplete
+    // pre-auth reads per route so held uploads cannot consume all webhook capacity.
+    if (!preAuthInFlightLimiter.tryAcquire(preAuthInFlightKey)) {
+      void sendHttpRequestRejection(
+        req,
+        res,
+        429,
+        "Rate limit exceeded",
+        "text/plain; charset=utf-8",
+      ).catch((err: unknown) => {
+        error(`feishu[${accountId}]: webhook concurrency rejection failed: ${String(err)}`);
+      });
+      return;
+    }
+
     const guard = installRequestBodyLimitGuard(req, res, {
       maxBytes: FEISHU_WEBHOOK_MAX_BODY_BYTES,
       timeoutMs: FEISHU_WEBHOOK_BODY_TIMEOUT_MS,
       responseFormat: "text",
     });
     if (guard.isTripped()) {
+      preAuthInFlightLimiter.release(preAuthInFlightKey);
       return;
     }
 
     void (async () => {
       try {
-        const body = await readWebhookBodyOrReject({
-          req,
-          res,
-          maxBytes: FEISHU_WEBHOOK_MAX_BODY_BYTES,
-          timeoutMs: FEISHU_WEBHOOK_BODY_TIMEOUT_MS,
-          profile: "pre-auth",
-        });
-        if (!body.ok || res.writableEnded) {
-          return;
-        }
-        if (guard.isTripped()) {
-          return;
-        }
-        const rawBody = body.value;
+        let rawBody: string;
+        try {
+          const body = await readWebhookBodyOrReject({
+            req,
+            res,
+            maxBytes: FEISHU_WEBHOOK_MAX_BODY_BYTES,
+            timeoutMs: FEISHU_WEBHOOK_BODY_TIMEOUT_MS,
+            profile: "pre-auth",
+          });
+          if (!body.ok || res.writableEnded) {
+            return;
+          }
+          if (guard.isTripped()) {
+            return;
+          }
+          rawBody = body.value;
 
-        // Reject invalid signatures before any JSON parsing to keep the auth boundary strict.
-        if (
-          !isFeishuWebhookSignatureValid({
-            headers: req.headers,
-            rawBody,
-            encryptKey,
-          })
-        ) {
-          respondText(res, 401, "Invalid signature");
-          return;
+          // Reject invalid signatures before any JSON parsing to keep the auth boundary strict.
+          if (
+            !isFeishuWebhookSignatureValid({
+              headers: req.headers,
+              rawBody,
+              encryptKey,
+            })
+          ) {
+            respondText(res, 401, "Invalid signature");
+            return;
+          }
+        } finally {
+          // This slot owns only untrusted body and signature work; authenticated
+          // parsing and dispatch must not reject new reads when downstream stalls.
+          guard.dispose();
+          preAuthInFlightLimiter.release(preAuthInFlightKey);
         }
 
         const payload = parseFeishuWebhookPayload(rawBody);
@@ -530,8 +559,6 @@ export async function monitorWebhook({
         if (!res.headersSent) {
           respondText(res, 500, "Internal Server Error");
         }
-      } finally {
-        guard.dispose();
       }
     })();
   });

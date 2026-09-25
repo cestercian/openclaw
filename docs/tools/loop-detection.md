@@ -64,7 +64,7 @@ Per-agent override (optional, at `agents.entries.*.tools.loopDetection`):
 
 The per-agent setting overrides the global setting.
 
-You can also enable the global rolling-history detectors in **Settings -> Labs** in the Control UI.
+You can also enable the global rolling-history detectors in **Settings → Agent Defaults → Tools** in the Control UI. Reset the setting to its default to disable the rolling detectors while keeping the post-compaction guard; explicitly turning it off disables both.
 
 ### Field behavior
 
@@ -83,6 +83,12 @@ stripped, so delivery IDs alone do not make repeated equivalent sends look like
 progress. When a run id is available, history is evaluated only within that run,
 so scheduled heartbeat cycles and fresh runs do not inherit stale loop counts
 from earlier runs.
+
+Successful `progress_card` calls are compared using the saved Markdown and plan,
+not their write revision or receipt wording. Saved revisions and delivered receipts
+are unchanged, so a requested refresh still receives a newer saved revision even
+when the card content is unchanged. Errors and results without the tool’s private
+semantic outcome keep full outcome comparison.
 
 Outcome comparisons also ignore fresh external-content wrapper nonces, including
 wrapped errors and JSON results. Delivered security markers remain unchanged;

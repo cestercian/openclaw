@@ -1,9 +1,20 @@
+import { GatewayErrorDetailCodes } from "@openclaw/gateway-client/browser";
 import type { TasksHistoryResult } from "../../../../../packages/gateway-protocol/src/index.ts";
-import type { GatewayBrowserClient } from "../../../api/gateway.ts";
+import {
+  GatewayRequestError,
+  resolveGatewayErrorDetailCode,
+  type GatewayBrowserClient,
+} from "../../../api/gateway.ts";
+import { extractTextCached } from "../../../lib/chat/message-extract.ts";
 import { visibleChatHistoryMessages } from "../../../lib/chat/message-visibility.ts";
+import { formatUiError } from "../../../lib/format-error.ts";
 import type { UiSessionDefaultsHost } from "../../../lib/sessions/session-key.ts";
 import type { TaskSummary } from "../../../lib/tasks/task-summary.ts";
+import { attachHistoryActivity } from "../chat-history-request.ts";
+import type { AssistantMessageExpansionState } from "../chat-message-recovery.ts";
 import { readChatThreadMessageIdentity } from "../chat-thread-items.ts";
+import { setExpansionState } from "../chat-thread.ts";
+import type { SidebarFullMessageLoader } from "./chat-sidebar-content-types.ts";
 
 const TASK_TRANSCRIPT_REFRESH_MS = 2_000;
 const TASK_TRANSCRIPT_REQUEST_LIMIT = 100;
@@ -14,9 +25,13 @@ type LoadedTaskTranscript = {
   nextCursor?: string;
   loading: boolean;
   error?: "refresh" | "older";
+  capacityMessage?: string;
 };
 
-type TaskTranscriptLoad = { status: "loading" } | LoadedTaskTranscript | { status: "error" };
+type TaskTranscriptLoad =
+  | { status: "loading" }
+  | LoadedTaskTranscript
+  | { status: "error"; capacityMessage?: string };
 
 type TaskDetailState = {
   client: GatewayBrowserClient;
@@ -28,17 +43,18 @@ type TaskDetailState = {
   refreshTimer: number | null;
   olderCursors: Set<string>;
   taskId: string;
+  fullMessages: Map<string, AssistantMessageExpansionState>;
 };
 
-export type TaskDetailHost = UiSessionDefaultsHost & {
-  sessionKey: string;
+export type TaskTranscriptHost = {
   client: GatewayBrowserClient | null;
   connected: boolean;
   connectionEpoch?: number;
   requestUpdate?: () => void;
-  sessionsResultAgentId?: string | null;
   taskDetailState?: TaskDetailState;
 };
+
+export type TaskDetailHost = TaskTranscriptHost & UiSessionDefaultsHost & { sessionKey: string };
 
 function clearRefreshTimer(state: TaskDetailState) {
   if (state.refreshTimer !== null) {
@@ -47,16 +63,70 @@ function clearRefreshTimer(state: TaskDetailState) {
   }
 }
 
-export function resetTaskDetail(host: TaskDetailHost) {
+export function resetTaskDetail(host: TaskTranscriptHost) {
   const current = host.taskDetailState;
   if (!current) {
     return;
   }
   clearRefreshTimer(current);
+  current.fullMessages.clear();
   host.taskDetailState = undefined;
 }
 
-function scheduleTranscriptLoad(host: TaskDetailHost, state: TaskDetailState) {
+export async function requestTaskFullMessage(
+  host: TaskTranscriptHost,
+  {
+    loader,
+    ...request
+  }: Parameters<SidebarFullMessageLoader>[0] & { loader: SidebarFullMessageLoader },
+) {
+  const state = host.taskDetailState;
+  if (
+    !state ||
+    !host.connected ||
+    host.client !== state.client ||
+    host.connectionEpoch !== state.connectionEpoch
+  ) {
+    return;
+  }
+  const current = state.fullMessages.get(request.messageId);
+  if (current?.status === "loading" || current?.status === "loaded") {
+    return;
+  }
+  const revision = (current?.revision ?? 0) + 1;
+  const pending = { status: "loading", revision } as const;
+  setExpansionState(state.fullMessages, request.messageId, pending);
+  host.requestUpdate?.();
+  let result: Awaited<ReturnType<SidebarFullMessageLoader>>;
+  try {
+    result = await loader(request);
+  } catch {
+    result = null;
+  }
+  // Reset or reconnection can reuse both the message ID and revision.
+  if (
+    host.taskDetailState !== state ||
+    host.client !== state.client ||
+    host.connectionEpoch !== state.connectionEpoch ||
+    state.fullMessages.get(request.messageId) !== pending
+  ) {
+    return;
+  }
+  const markdown =
+    result?.ok && result.message && typeof result.message === "object"
+      ? extractTextCached(result.message)
+      : null;
+  setExpansionState(
+    state.fullMessages,
+    request.messageId,
+    markdown === null
+      ? { status: "error", revision: revision + 1 }
+      : { status: "loaded", markdown, revision: revision + 1 },
+  );
+  host.requestUpdate?.();
+}
+
+function scheduleTranscriptLoad(host: TaskTranscriptHost, state: TaskDetailState) {
   if (host.taskDetailState !== state || state.inFlight) {
     return;
   }
@@ -96,7 +166,11 @@ function transcriptOverlap(earlier: unknown[], later: unknown[]): number {
   });
 }
 
-async function loadTranscriptPage(host: TaskDetailHost, state: TaskDetailState, cursor?: string) {
+async function loadTranscriptPage(
+  host: TaskTranscriptHost,
+  state: TaskDetailState,
+  cursor?: string,
+) {
   if (host.taskDetailState !== state || state.inFlight) {
     return;
   }
@@ -117,7 +191,9 @@ async function loadTranscriptPage(host: TaskDetailHost, state: TaskDetailState, 
     state.lastRequestStartedAt = Date.now();
     state.refreshPending = false;
   }
-  state.load = previous ? { ...previous, loading: true, error: undefined } : { status: "loading" };
+  state.load = previous
+    ? { ...previous, loading: true, error: undefined, capacityMessage: undefined }
+    : { status: "loading" };
   host.requestUpdate?.();
   let load: TaskTranscriptLoad;
   try {
@@ -126,7 +202,7 @@ async function loadTranscriptPage(host: TaskDetailHost, state: TaskDetailState, 
       limit: TASK_TRANSCRIPT_REQUEST_LIMIT,
       ...(cursor ? { cursor } : {}),
     });
-    const messages = visibleChatHistoryMessages(result.messages);
+    const messages = visibleChatHistoryMessages(attachHistoryActivity(result).messages);
     const previousMessages = previous?.messages ?? [];
     const earlier = cursor ? messages : previousMessages;
     const later = cursor ? previousMessages : messages;
@@ -154,10 +230,16 @@ async function loadTranscriptPage(host: TaskDetailHost, state: TaskDetailState, 
             : undefined,
       loading: false,
     };
-  } catch {
+  } catch (error) {
+    const capacityMessage =
+      error instanceof GatewayRequestError &&
+      error.gatewayCode === "UNAVAILABLE" &&
+      resolveGatewayErrorDetailCode(error) === GatewayErrorDetailCodes.TASK_HISTORY_PREVIEW_CAPACITY
+        ? formatUiError(error)
+        : undefined;
     load = previous
-      ? { ...previous, loading: false, error: cursor ? "older" : "refresh" }
-      : { status: "error" };
+      ? { ...previous, loading: false, error: cursor ? "older" : "refresh", capacityMessage }
+      : { status: "error", ...(capacityMessage ? { capacityMessage } : {}) };
   }
   const current = host.taskDetailState;
   if (
@@ -177,7 +259,7 @@ async function loadTranscriptPage(host: TaskDetailHost, state: TaskDetailState, 
 }
 
 export function readTaskTranscript(
-  host: TaskDetailHost,
+  host: TaskTranscriptHost,
   selection: { taskId: string },
 ): TaskTranscriptLoad {
   const client = host.client;
@@ -204,20 +286,21 @@ export function readTaskTranscript(
     refreshTimer: null,
     olderCursors: new Set(),
     taskId: selection.taskId,
+    fullMessages: new Map(),
   };
   host.taskDetailState = next;
   scheduleTranscriptLoad(host, next);
   return next.load;
 }
 
-export function loadOlderTaskTranscript(host: TaskDetailHost) {
+export function loadOlderTaskTranscript(host: TaskTranscriptHost) {
   const state = host.taskDetailState;
   if (state?.load.status === "loaded" && state.load.nextCursor) {
     void loadTranscriptPage(host, state, state.load.nextCursor);
   }
 }
 
-export function retryTaskTranscript(host: TaskDetailHost) {
+export function retryTaskTranscript(host: TaskTranscriptHost) {
   const state = host.taskDetailState;
   if (!state) {
     host.requestUpdate?.();
@@ -232,7 +315,7 @@ export function retryTaskTranscript(host: TaskDetailHost) {
 }
 
 export function observeTaskDetailEvent(
-  host: TaskDetailHost,
+  host: TaskTranscriptHost,
   event:
     | { action: "upserted"; task: TaskSummary }
     | { action: "deleted"; taskId: string }

@@ -1,11 +1,11 @@
 /**
  * Control UI gateway routing tests.
  */
+import { isControlUiFocusPath } from "@openclaw/session-url-contract";
 import { describe, expect, it } from "vitest";
 import {
   classifyControlUiRequest,
   isControlUiApprovalDocumentPath,
-  isControlUiFocusDocumentPath,
   isControlUiPluginManagerRequest,
 } from "./control-ui-routing.js";
 
@@ -45,7 +45,7 @@ describe("isControlUiApprovalDocumentPath", () => {
   });
 });
 
-describe("isControlUiFocusDocumentPath", () => {
+describe("isControlUiFocusPath", () => {
   it.each([
     { basePath: "", pathname: "/focus" },
     { basePath: "", pathname: "/focus/" },
@@ -53,7 +53,7 @@ describe("isControlUiFocusDocumentPath", () => {
     { basePath: "", pathname: "/focus/not-supported" },
     { basePath: "/openclaw", pathname: "/openclaw/focus/desktop/control" },
   ])("classifies $pathname", ({ basePath, pathname }) => {
-    expect(isControlUiFocusDocumentPath({ basePath, pathname })).toBe(true);
+    expect(isControlUiFocusPath(pathname, basePath)).toBe(true);
   });
 
   it.each([
@@ -62,7 +62,7 @@ describe("isControlUiFocusDocumentPath", () => {
     { basePath: "/openclaw", pathname: "/focus/terminal" },
     { basePath: "/openclaw", pathname: "/openclaw/focused" },
   ])("does not classify $pathname", ({ basePath, pathname }) => {
-    expect(isControlUiFocusDocumentPath({ basePath, pathname })).toBe(false);
+    expect(isControlUiFocusPath(pathname, basePath)).toBe(false);
   });
 });
 
@@ -189,10 +189,16 @@ describe("classifyControlUiRequest", () => {
         { kind: "not-control-ui" as const },
       ],
       [
-        "keeps the plugin HTTP root outside the SPA catch-all",
+        "serves the marketplace document at the plugin root",
         "/plugins",
         "GET",
-        { kind: "not-control-ui" as const },
+        { kind: "serve" as const, spaFallback: true },
+      ],
+      [
+        "serves the marketplace document at the plugin root slash",
+        "/plugins/",
+        "GET",
+        { kind: "serve" as const, spaFallback: true },
       ],
       [
         "keeps API routes outside the SPA catch-all",
@@ -356,6 +362,42 @@ describe("classifyControlUiRequest", () => {
     });
   });
 
+  describe("plugin catalogue documents vs plugin HTTP", () => {
+    it.each([
+      {
+        name: "serves HTML GET for the catalogue root slash",
+        pathname: "/plugins/",
+        method: "GET",
+        accept: "text/html",
+        expected: { kind: "serve" as const, spaFallback: true },
+      },
+      {
+        name: "keeps JSON catalogue reads outside the SPA",
+        pathname: "/plugins",
+        method: "GET",
+        accept: "application/json",
+        expected: { kind: "not-control-ui" as const },
+      },
+      {
+        name: "keeps JSON catalogue slash reads outside the SPA",
+        pathname: "/plugins/",
+        method: "GET",
+        accept: "application/json",
+        expected: { kind: "not-control-ui" as const },
+      },
+    ])("$name", ({ pathname, method, accept, expected }) => {
+      expect(
+        classifyControlUiRequest({
+          basePath: "",
+          pathname,
+          search: "",
+          method,
+          accept,
+        }),
+      ).toEqual(expected);
+    });
+  });
+
   describe("basePath-mounted control ui", () => {
     it.each<[string, string, string, string, ReturnType<typeof classifyControlUiRequest>]>([
       [
@@ -370,6 +412,27 @@ describe("classifyControlUiRequest", () => {
         "/openclaw/chat",
         "",
         "HEAD",
+        { kind: "serve" as const, spaFallback: true },
+      ],
+      [
+        "serves the plugin catalogue under a configured basePath",
+        "/openclaw/plugins",
+        "",
+        "GET",
+        { kind: "serve" as const, spaFallback: true },
+      ],
+      [
+        "serves the plugin catalogue slash under a configured basePath",
+        "/openclaw/plugins/",
+        "",
+        "GET",
+        { kind: "serve" as const, spaFallback: true },
+      ],
+      [
+        "serves the plugin manager under a configured basePath",
+        "/openclaw/settings/plugins",
+        "",
+        "GET",
         { kind: "serve" as const, spaFallback: true },
       ],
       [

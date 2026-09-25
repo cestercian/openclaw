@@ -39,14 +39,6 @@ function nextChatRunOrderingSequence(): number {
   return chatRunOrderingSequence;
 }
 
-/** Stamp a chat run registration with the process-local ordering metadata used for abort freshness checks. */
-function createChatRunEntry(entry: ChatRunRegistration): ChatRunEntry {
-  return {
-    ...entry,
-    registeredSequence: nextChatRunOrderingSequence(),
-  };
-}
-
 /** Create an abort marker ordered against chat run registrations, using a shared monotonic sequence. */
 export function createChatAbortMarker(now = Date.now()): ChatAbortMarker {
   return { abortedAtMs: now, sequence: nextChatRunOrderingSequence() };
@@ -171,19 +163,14 @@ export type ChatRunRegistry = {
 
 function createChatRunRegistryForStore(store: ChatRunRecordStore): ChatRunRegistry {
   const add = (sessionId: string, entry: ChatRunRegistration) => {
-    const registeredEntry = createChatRunEntry(entry);
+    const registeredEntry = { ...entry, registeredSequence: nextChatRunOrderingSequence() };
     const record = store.getOrCreate(sessionId);
-    const queue = record.registrations;
-    if (queue) {
-      queue.push(registeredEntry);
-    } else {
-      record.registrations = [registeredEntry];
-    }
+    (record.registrations ??= []).push(registeredEntry);
   };
 
   const peek = (sessionId: string) => store.runs.get(sessionId)?.registrations?.[0];
 
-  const shift = (sessionId: string) => {
+  const takeRegistration = (sessionId: string, clientRunId?: string, sessionKey?: string) => {
     const record = store.runs.get(sessionId);
     if (!record) {
       return undefined;
@@ -192,27 +179,13 @@ function createChatRunRegistryForStore(store: ChatRunRecordStore): ChatRunRegist
     if (!queue || queue.length === 0) {
       return undefined;
     }
-    const entry = queue.shift();
-    if (!queue.length) {
-      delete record.registrations;
-      store.releaseIfEmpty(sessionId);
-    }
-    return entry;
-  };
-
-  const remove = (sessionId: string, clientRunId: string, sessionKey?: string) => {
-    const record = store.runs.get(sessionId);
-    if (!record) {
-      return undefined;
-    }
-    const queue = record.registrations;
-    if (!queue || queue.length === 0) {
-      return undefined;
-    }
-    const idx = queue.findIndex(
-      (entry) =>
-        entry.clientRunId === clientRunId && (sessionKey ? entry.sessionKey === sessionKey : true),
-    );
+    const idx =
+      clientRunId === undefined
+        ? 0
+        : queue.findIndex(
+            (entry) =>
+              entry.clientRunId === clientRunId && (!sessionKey || entry.sessionKey === sessionKey),
+          );
     if (idx < 0) {
       return undefined;
     }
@@ -224,7 +197,7 @@ function createChatRunRegistryForStore(store: ChatRunRecordStore): ChatRunRegist
     return entry;
   };
 
-  return { add, peek, shift, remove };
+  return { add, peek, shift: (sessionId) => takeRegistration(sessionId), remove: takeRegistration };
 }
 
 export type ChatRunState = {
@@ -236,6 +209,7 @@ export type ChatRunState = {
     runId: string,
     options?: { final?: boolean },
   ) => { text: string; suppress: boolean };
+  flushPendingText: (runId: string) => void;
   hasAbortMarker: (runId: string) => boolean;
   deleteAbortMarker: (runId: string) => void;
   recordProgressEvent: (runId: string, event: AgentEventPayload, mode?: "full" | "summary") => void;
@@ -337,6 +311,17 @@ export function createChatRunState(): ChatRunState {
     toolEventRecipients,
     getOrCreate: store.getOrCreate,
     resolveBuffer,
+    flushPendingText: (runId) => {
+      const record = store.runs.get(runId);
+      if (!record) {
+        return;
+      }
+      const pending = Object.values(record.pendingTextFlushes ?? {});
+      clearPendingLiveTextFlushes(record);
+      for (const flush of pending) {
+        flush.flush();
+      }
+    },
     hasAbortMarker: (runId) => store.runs.get(runId)?.abortMarker !== undefined,
     deleteAbortMarker: (runId) => {
       const record = store.runs.get(runId);
@@ -356,6 +341,7 @@ export type ToolEventRecipientRegistry = {
   add: (runId: string, connId: string) => void;
   get: (runId: string) => ReadonlySet<string> | undefined;
   markFinal: (runId: string) => void;
+  pruneExpired: (now?: number) => void;
 };
 
 export type SessionEventSubscriberRegistry = {
@@ -427,7 +413,6 @@ export function createSessionMessageSubscriberRegistry(
   const empty = new Set<string>();
   let subscriptionSequence = 0;
 
-  const normalize = (value: string): string => value.trim();
   const setMessageSubscription = (connId: string, sessionKey: string, subscribed: boolean) => {
     const connIds = sessionToConnIds.get(sessionKey);
     const wasSubscribed = connIds?.has(connId) === true;
@@ -468,8 +453,8 @@ export function createSessionMessageSubscriberRegistry(
 
   const registry: SessionMessageSubscriberRegistry = {
     subscribe: (connId: string, sessionKey: string, opts) => {
-      const normalizedConnId = normalize(connId);
-      const normalizedSessionKey = normalize(sessionKey);
+      const normalizedConnId = connId.trim();
+      const normalizedSessionKey = sessionKey.trim();
       if (
         !normalizedConnId ||
         !normalizedSessionKey ||
@@ -536,8 +521,8 @@ export function createSessionMessageSubscriberRegistry(
       return rollback;
     },
     unsubscribe: (connId: string, sessionKey: string) => {
-      const normalizedConnId = normalize(connId);
-      const normalizedSessionKey = normalize(sessionKey);
+      const normalizedConnId = connId.trim();
+      const normalizedSessionKey = sessionKey.trim();
       if (!normalizedConnId || !normalizedSessionKey) {
         return;
       }
@@ -550,7 +535,7 @@ export function createSessionMessageSubscriberRegistry(
       setApprovalSubscription(normalizedConnId, normalizedSessionKey, false);
     },
     unsubscribeAll: (connId: string) => {
-      const normalizedConnId = normalize(connId);
+      const normalizedConnId = connId.trim();
       if (!normalizedConnId) {
         return;
       }
@@ -566,20 +551,8 @@ export function createSessionMessageSubscriberRegistry(
         setApprovalSubscription(normalizedConnId, sessionKey, false);
       }
     },
-    get: (sessionKey: string) => {
-      const normalizedSessionKey = normalize(sessionKey);
-      if (!normalizedSessionKey) {
-        return empty;
-      }
-      return sessionToConnIds.get(normalizedSessionKey) ?? empty;
-    },
-    getApprovals: (sessionKey: string) => {
-      const normalizedSessionKey = normalize(sessionKey);
-      if (!normalizedSessionKey) {
-        return empty;
-      }
-      return approvalSessionToConnIds.get(normalizedSessionKey) ?? empty;
-    },
+    get: (sessionKey) => sessionToConnIds.get(sessionKey.trim()) ?? empty,
+    getApprovals: (sessionKey) => approvalSessionToConnIds.get(sessionKey.trim()) ?? empty,
     onChange: (listener) => {
       changeListeners.add(listener);
       return () => changeListeners.delete(listener);
@@ -591,11 +564,12 @@ export function createSessionMessageSubscriberRegistry(
 function createToolEventRecipientRegistryForStore(
   store: ChatRunRecordStore,
 ): ToolEventRecipientRegistry {
-  const prune = () => {
-    if (store.runs.size === 0) {
+  let nextPruneAt = Infinity;
+  const pruneExpired = (now = Date.now()) => {
+    if (now < nextPruneAt) {
       return;
     }
-    const now = Date.now();
+    nextPruneAt = Infinity;
     for (const [runId, record] of store.runs) {
       const entry = record.toolRecipient;
       if (!entry) {
@@ -607,8 +581,22 @@ function createToolEventRecipientRegistryForStore(
       if (now >= cutoff) {
         delete record.toolRecipient;
         store.releaseIfEmpty(runId);
+      } else {
+        nextPruneAt = Math.min(nextPruneAt, cutoff);
       }
     }
+  };
+
+  const prune = (updated: ChatRunToolRecipientState) => {
+    // Refreshes can move expiry later; a conservative lower bound avoids a
+    // full run scan on each tool event while retaining exact expiry cleanup.
+    nextPruneAt = Math.min(
+      nextPruneAt,
+      updated.finalizedAt
+        ? updated.finalizedAt + TOOL_EVENT_RECIPIENT_FINAL_GRACE_MS
+        : updated.updatedAt + TOOL_EVENT_RECIPIENT_TTL_MS,
+    );
+    pruneExpired();
   };
 
   const add = (runId: string, connId: string) => {
@@ -616,25 +604,20 @@ function createToolEventRecipientRegistryForStore(
       return;
     }
     const now = Date.now();
-    const record = store.getOrCreate(runId);
-    const existing = record.toolRecipient;
-    if (existing) {
-      existing.connIds.add(connId);
-      existing.updatedAt = now;
-    } else {
-      record.toolRecipient = {
-        connIds: new Set([connId]),
-        updatedAt: now,
-      };
-    }
-    prune();
+    const entry = (store.getOrCreate(runId).toolRecipient ??= {
+      connIds: new Set<string>(),
+      updatedAt: now,
+    });
+    entry.connIds.add(connId);
+    entry.updatedAt = now;
+    prune(entry);
   };
 
   const get = (runId: string) => {
     const entry = store.runs.get(runId)?.toolRecipient;
     if (entry) {
       entry.updatedAt = Date.now();
-      prune();
+      prune(entry);
     }
     // Pruning may retire this finalized run; never return its former audience.
     return store.runs.get(runId)?.toolRecipient?.connIds;
@@ -646,8 +629,8 @@ function createToolEventRecipientRegistryForStore(
       return;
     }
     entry.finalizedAt = Date.now();
-    prune();
+    prune(entry);
   };
 
-  return { add, get, markFinal };
+  return { add, get, markFinal, pruneExpired };
 }

@@ -1,7 +1,11 @@
 import { Value } from "typebox/value";
 import { describe, expect, it } from "vitest";
 import { PluginDiscoveryEntrySchema } from "../../packages/gateway-protocol/src/schema/plugins.js";
-import { joinClawHubPluginCatalog, resolvePluginDiscoveryIdentity } from "./catalog-discovery.js";
+import {
+  joinClawHubPluginCatalog,
+  joinLocalPluginDetail,
+  resolvePluginDiscoveryIdentity,
+} from "./catalog-discovery.js";
 
 const remote = {
   packageName: "@alice/memory-plus",
@@ -117,7 +121,6 @@ describe("plugin discovery identity and local join", () => {
         diagnostics: [],
         mutationAllowed: true,
       },
-      published: [],
       includeBundledOnly: true,
     });
 
@@ -151,7 +154,6 @@ describe("plugin discovery identity and local join", () => {
       remote: [],
       local,
       includeBundledOnly: true,
-      published: [remote],
       intent: "bundled",
       category: "web",
     });
@@ -162,7 +164,8 @@ describe("plugin discovery identity and local join", () => {
       catalog: {
         packageName: bundledOnly.packageName,
         categories: ["tools", "web"],
-        official: false,
+        official: true,
+        author: "openclaw",
         publishedToClawHub: false,
       },
       local: {
@@ -177,7 +180,74 @@ describe("plugin discovery identity and local join", () => {
     });
   });
 
-  it("uses the complete publication set so a later ClawHub page cannot become a bundled result", () => {
+  it.each([
+    ["bundled", "@openclaw/calendar-local"],
+    ["official", "@acme/calendar-local"],
+    ["global", "@openclaw/calendar-local"],
+    ["workspace", "@openclaw/calendar-local"],
+  ])(
+    "derives %s attribution from Gateway provenance, never package name %s",
+    (origin, packageName) => {
+      const plugin = {
+        id: "calendar-local",
+        name: "Calendar Local",
+        packageName,
+        origin,
+        installed: true,
+        enabled: true,
+        state: "enabled" as const,
+      };
+      const local = { plugins: [plugin], diagnostics: [], mutationAllowed: true };
+      const [item] = joinClawHubPluginCatalog({ remote: [], local, intent: "all" });
+      const official = origin === "bundled";
+      expect(item?.catalog.official).toBe(official);
+      expect(item?.catalog.author).toBe(official ? "openclaw" : undefined);
+      expect(item?.catalog.publishedToClawHub).not.toBe(true);
+      expect(joinLocalPluginDetail({ plugin, local }).detail.author).toEqual(
+        official ? { handle: "openclaw", displayName: "OpenClaw", official: true } : undefined,
+      );
+    },
+  );
+
+  it.each([
+    ["all", undefined, true],
+    ["official", undefined, true],
+    ["bundled", undefined, true],
+    ["featured", undefined, false],
+    ["trending", undefined, false],
+    ["updated", undefined, false],
+    ["official", "page-two", false],
+  ] as const)(
+    "keeps local additions scoped to %s intent and cursor %s",
+    (intent, cursor, visible) => {
+      const items = joinClawHubPluginCatalog({
+        remote: [],
+        local: {
+          plugins: [
+            {
+              id: "calendar-local",
+              name: "Calendar Local",
+              origin: "bundled",
+              installed: true,
+              enabled: true,
+              state: "enabled",
+            },
+          ],
+          diagnostics: [],
+          mutationAllowed: true,
+        },
+        intent,
+        includeBundledOnly: intent === "bundled" || intent === "official",
+        cursor,
+      });
+      expect(items).toHaveLength(visible ? 1 : 0);
+      if (visible) {
+        expect(items[0]?.catalog).toMatchObject({ official: true, author: "openclaw" });
+      }
+    },
+  );
+
+  it("uses the local catalog counterpart to exclude published bundled plugins", () => {
     const expedia = {
       ...remote,
       packageName: "@expediagroup/expedia-openclaw",
@@ -189,8 +259,9 @@ describe("plugin discovery identity and local join", () => {
         {
           id: "expedia-travel",
           packageName: expedia.packageName,
+          clawhubPackage: expedia.packageName,
           name: "Expedia Travel",
-          origin: "official",
+          origin: "bundled",
           installed: false,
           enabled: false,
           state: "not-installed" as const,
@@ -211,7 +282,6 @@ describe("plugin discovery identity and local join", () => {
 
     const items = joinClawHubPluginCatalog({
       remote: [],
-      published: [expedia],
       local,
       includeBundledOnly: true,
       intent: "bundled",
@@ -223,7 +293,6 @@ describe("plugin discovery identity and local join", () => {
   it("does not repeat local-only entries on remote cursor pages", () => {
     const items = joinClawHubPluginCatalog({
       remote: [remote],
-      published: [],
       local: {
         plugins: [
           {
@@ -249,7 +318,6 @@ describe("plugin discovery identity and local join", () => {
   it("keeps unmatched installed entries in All search and deduplicates remote matches", () => {
     const items = joinClawHubPluginCatalog({
       remote: [remote],
-      published: [],
       local: {
         plugins: [
           {
@@ -301,7 +369,6 @@ describe("plugin discovery identity and local join", () => {
   it("keeps installed packages when ClawHub publication exists but the search page omits them", () => {
     const items = joinClawHubPluginCatalog({
       remote: [],
-      published: [remote],
       local: {
         plugins: [
           {
@@ -388,7 +455,6 @@ describe("plugin discovery identity and local join", () => {
     };
     const common = {
       remote: [remote],
-      published: [remote],
       local,
       includeBundledOnly: true,
     } as const;
