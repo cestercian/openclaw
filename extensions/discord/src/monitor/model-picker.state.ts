@@ -1,4 +1,3 @@
-// Discord plugin module implements model picker.state behavior.
 import { createHash } from "node:crypto";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-contracts";
 import { expectDefined } from "openclaw/plugin-sdk/expect-runtime";
@@ -39,7 +38,6 @@ const PICKER_VIEWS = ["providers", "models", "recents"] as const;
 export type DiscordModelPickerCommandContext = (typeof COMMAND_CONTEXTS)[number];
 type DiscordModelPickerAction = (typeof PICKER_ACTIONS)[number];
 type DiscordModelPickerView = (typeof PICKER_VIEWS)[number];
-export type DiscordModelPickerLayout = "v2" | "classic";
 
 export type DiscordModelPickerState = {
   command: DiscordModelPickerCommandContext;
@@ -209,23 +207,9 @@ export async function loadDiscordModelPickerData(
   return buildPreparedModelsProviderData(cfg, agentId, options);
 }
 
-export function buildDiscordModelPickerCustomId(params: {
-  command: DiscordModelPickerCommandContext;
-  action: DiscordModelPickerAction;
-  view: DiscordModelPickerView;
-  userId: string;
-  provider?: string;
-  runtime?: string;
-  runtimeIndex?: number;
-  runtimeToken?: string;
-  page?: number;
-  providerPage?: number;
-  modelIndex?: number;
-  modelToken?: string;
-  recentSlot?: number;
-  providerBucket?: string;
-  modelBucket?: string;
-}): string {
+export function buildDiscordModelPickerCustomId(
+  params: Omit<DiscordModelPickerState, "page"> & { page?: number },
+): string {
   const userId = params.userId.trim();
   if (!userId) {
     throw new Error("Discord model picker custom_id requires userId");
