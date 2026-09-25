@@ -184,6 +184,26 @@ describe("CallManager notify and mapping", () => {
     },
   );
 
+  it("speaks the Twilio Say fallback greeting in one update when streaming is disabled", async () => {
+    const { manager, provider } = await createManagerHarness(
+      { streaming: { enabled: false } },
+      new FakeProvider("twilio"),
+    );
+
+    const callId = await initiateCallWithMessage(
+      manager,
+      "+15550000004",
+      "Twilio non-stream",
+      "conversation",
+    );
+    await answerCall(manager, callId, "evt-conversation-twilio-no-stream");
+
+    expectFirstPlayTtsText(provider, "Twilio non-stream");
+    expect(requireFirstPlayTtsCall(provider).listenAfterPlayback).toBe(true);
+    expect(provider.startListeningCalls).toHaveLength(0);
+    expect(requireCall(manager, callId).state).toBe("listening");
+  });
+
   it("lets realtime conversations own the initial greeting instead of posting legacy TwiML", async () => {
     const { manager, provider } = await createManagerHarness(
       { realtime: { enabled: true, provider: "openai" } },
@@ -255,20 +275,20 @@ describe("CallManager notify and mapping", () => {
   });
 
   it("logs fire-and-forget initial-message failures instead of leaking unhandled rejections", async () => {
-    const provider = new FailStartListeningProvider("twilio");
+    const provider = new FailStartListeningProvider("telnyx");
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     try {
-      const { manager } = await createManagerHarness({ streaming: { enabled: false } }, provider);
+      const { manager } = await createManagerHarness({}, provider);
 
       const callId = await initiateCallWithMessage(
         manager,
         "+15550000013",
-        "Twilio hello",
+        "Telnyx hello",
         "conversation",
       );
       await answerCall(manager, callId, "evt-initial-message-start-listening-fails");
 
-      expectFirstPlayTtsText(provider, "Twilio hello");
+      expectFirstPlayTtsText(provider, "Telnyx hello");
       const startListeningCall = requireSingleStartListeningCall(provider);
       expect(startListeningCall.callId).toBe(callId);
       expect(startListeningCall.providerCallId).toBe("call-uuid");
