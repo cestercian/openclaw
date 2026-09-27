@@ -155,6 +155,7 @@ describe("CallManager notify and mapping", () => {
       await vi.advanceTimersByTimeAsync(1_000);
 
       expect(provider.hangupCalls).toHaveLength(1);
+      expect(requireFirstPlayTtsCall(provider).holdBeforeHangupSec).toBe(1);
       expect(manager.getCall(callId)).toBeDefined();
       expect(warn).toHaveBeenCalledWith(
         `[voice-call] Notify mode failed to hang up call ${callId}: synthetic hangup failure`,
@@ -180,6 +181,8 @@ describe("CallManager notify and mapping", () => {
       await answerCall(manager, callId, `evt-2-${providerName}`);
 
       expectFirstPlayTtsText(provider, "Hello there");
+      expect(requireFirstPlayTtsCall(provider).holdBeforeHangupSec).toBe(3);
+      expect(requireFirstPlayTtsCall(provider).listenAfterPlayback).toBeUndefined();
       await expectNotifyHangup(manager, provider, callId);
     },
   );
@@ -200,6 +203,7 @@ describe("CallManager notify and mapping", () => {
 
     expectFirstPlayTtsText(provider, "Twilio non-stream");
     expect(requireFirstPlayTtsCall(provider).listenAfterPlayback).toBe(true);
+    expect(requireFirstPlayTtsCall(provider).holdBeforeHangupSec).toBeUndefined();
     expect(provider.startListeningCalls).toHaveLength(0);
     expect(requireCall(manager, callId).state).toBe("listening");
   });
@@ -254,6 +258,9 @@ describe("CallManager notify and mapping", () => {
     await answerCall(manager, callId, "evt-conversation-twilio-stream-unavailable");
 
     expectFirstPlayTtsText(provider, "Twilio stream unavailable");
+    expect(requireFirstPlayTtsCall(provider).listenAfterPlayback).toBe(true);
+    expect(requireFirstPlayTtsCall(provider).holdBeforeHangupSec).toBeUndefined();
+    expect(provider.startListeningCalls).toHaveLength(0);
   });
 
   it("starts listening after the initial greeting for Telnyx conversation calls", async () => {

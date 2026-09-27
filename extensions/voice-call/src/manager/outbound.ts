@@ -279,6 +279,8 @@ export async function initiateCall(
 
 export type SpeakOptions = {
   listenAfterPlayback?: boolean;
+  /** Notify calls: seconds to keep the line up after playback before hangup. */
+  holdBeforeHangupSec?: number;
   isCurrent?: () => boolean;
 };
 
@@ -334,7 +336,16 @@ export async function speak(
     const voice = resolvePreferredTtsVoice(
       resolveVoiceCallEffectiveConfig(ctx.config, numberRouteKey).config,
     );
-    const playbackOptions = options?.listenAfterPlayback ? { listenAfterPlayback: true } : {};
+    const playbackOptions: {
+      listenAfterPlayback?: true;
+      holdBeforeHangupSec?: number;
+    } = {};
+    if (options?.listenAfterPlayback) {
+      playbackOptions.listenAfterPlayback = true;
+    }
+    if (options?.holdBeforeHangupSec != null) {
+      playbackOptions.holdBeforeHangupSec = options.holdBeforeHangupSec;
+    }
     await provider.playTts({
       callId,
       providerCallId: call.providerCallId ?? providerCallId,
@@ -436,14 +447,29 @@ export async function speakInitialMessage(
     mode === "conversation" &&
     ctx.provider?.name === "twilio" &&
     shouldStartListeningAfterInitialMessage(ctx);
+  const notifyHangup =
+    mode === "notify"
+      ? {
+          delaySec: ctx.config.outbound.notifyHangupDelaySec,
+          delayMs: resolveVoiceCallSecondsTimerDelayMs(ctx.config.outbound.notifyHangupDelaySec, 0),
+        }
+      : undefined;
 
   try {
     console.log(`[voice-call] Speaking initial message for call ${call.callId} (mode: ${mode})`);
+    const speakOptions: SpeakOptions = {};
+    if (listenAfterInitialTwilioSayFallback) {
+      speakOptions.listenAfterPlayback = true;
+    }
+    if (notifyHangup) {
+      speakOptions.holdBeforeHangupSec =
+        notifyHangup.delayMs === 0 ? 0 : Math.ceil(notifyHangup.delayMs / 1000);
+    }
     const result = await speak(
       ctx,
       call.callId,
       initialMessage,
-      listenAfterInitialTwilioSayFallback ? { listenAfterPlayback: true } : undefined,
+      listenAfterInitialTwilioSayFallback || notifyHangup ? speakOptions : undefined,
     );
     if (!result.success) {
       console.warn(`[voice-call] Failed to speak initial message: ${result.error}`);
@@ -465,9 +491,8 @@ export async function speakInitialMessage(
     if (ctx.isStopping()) {
       throw new Error("Voice Call manager is stopping");
     }
-    if (mode === "notify") {
-      const delaySec = ctx.config.outbound.notifyHangupDelaySec;
-      const delayMs = resolveVoiceCallSecondsTimerDelayMs(delaySec, 0);
+    if (notifyHangup) {
+      const { delaySec, delayMs } = notifyHangup;
       console.log(`[voice-call] Notify mode: auto-hangup in ${delaySec}s for call ${call.callId}`);
       const previousTimer = ctx.notifyHangupTimers.get(call.callId);
       if (previousTimer) {

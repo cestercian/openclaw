@@ -34,7 +34,7 @@ import { guardedJsonApiRequest } from "./shared/guarded-json-api.js";
 import { resolveTwilioApiBaseUrl, type TwilioRegion } from "./twilio-region.js";
 import type { TwilioProviderOptions } from "./twilio.types.js";
 import { TwilioApiError, twilioApiRequest } from "./twilio/api.js";
-import { buildTwilioSpeechGatherVerbs } from "./twilio/speech-gather.js";
+import { buildTwilioSpeechGatherVerbs, buildTwilioSpeechOnlyTail } from "./twilio/speech-gather.js";
 import { decideTwimlResponse, readTwimlRequestView } from "./twilio/twiml-policy.js";
 import { verifyTwilioProviderWebhook } from "./twilio/webhook.js";
 export type { TwilioProviderOptions } from "./twilio.types.js";
@@ -631,12 +631,19 @@ export class TwilioProvider implements VoiceCallProvider {
     );
 
     const pollyVoice = mapVoiceToPolly(input.voice);
-    const gatherVerbs = input.listenAfterPlayback
-      ? `\n${buildTwilioSpeechGatherVerbs({ webhookUrl, language: input.locale })}\n`
-      : "";
+    // Conversation greetings listen in this same update. Notify and direct speech
+    // still need a verb after <Say>, or Twilio completes the call when playback ends.
+    const tail = input.listenAfterPlayback
+      ? buildTwilioSpeechGatherVerbs({ webhookUrl, language: input.locale })
+      : buildTwilioSpeechOnlyTail({
+          webhookUrl,
+          holdBeforeHangupSec: input.holdBeforeHangupSec,
+        });
     const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Say voice="${pollyVoice}" language="${input.locale || "en-US"}">${escapeXml(input.text)}</Say>${gatherVerbs}</Response>`;
+  <Say voice="${pollyVoice}" language="${input.locale || "en-US"}">${escapeXml(input.text)}</Say>
+${tail}
+</Response>`;
 
     await this.updateLiveCallTwiml(input.providerCallId, twiml, "playTts");
   }
