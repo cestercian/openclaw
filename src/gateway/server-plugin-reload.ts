@@ -178,7 +178,11 @@ export async function reloadGatewayPlugins(
   let stagedReloadStatus: GatewayPluginReloadStatus | undefined;
   const reportReloadStatus = (status: GatewayPluginReloadStatus | undefined) => {
     stagedReloadStatus = status;
-    replacement?.setReloadStatus(status);
+    if (replacement) {
+      replacement.setReloadStatus(status);
+      return;
+    }
+    kernel.pluginRuntimeGeneration.publishReloadStatus(status);
   };
   const assertCurrent = () => {
     drainSignal.throwIfAborted();
@@ -488,6 +492,10 @@ export async function reloadGatewayPlugins(
       runtime: receipt,
     };
   } catch (error) {
+    if (!replacement) {
+      kernel.pluginRuntimeGeneration.publishReloadStatus(undefined);
+      stagedReloadStatus = undefined;
+    }
     let failure = includeServiceStopFailure(error);
     const onCleanupFailure = (message: string) => (cleanupError: unknown) => {
       failure = new AggregateError([failure, cleanupError], message);

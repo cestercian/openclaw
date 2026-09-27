@@ -1048,7 +1048,7 @@ describe("gateway plugin instance bindings", () => {
   );
 
   it(
-    "a retained-work reload refusal leaves the serving runtime generation authoritative",
+    "a retained-work reload refusal reports queued readiness and leaves the serving runtime authoritative",
     { timeout: 120_000 },
     async () => {
       const { coordinator } = await prepareInstanceBindingTest();
@@ -1074,26 +1074,49 @@ describe("gateway plugin instance bindings", () => {
       const releaseWork = instance.retainWork();
       const hostCleanup = await import("../plugins/host-hook-cleanup-timeout.js");
       const withCleanupTimeout = hostCleanup.withPluginHostCleanupTimeout;
+      const observeQueuedReadiness = createDeferred<void>();
+      const readGatewayReadiness = async () => {
+        const response = await fetch(`http://127.0.0.1:${claim.port}/readyz`);
+        return await response.json();
+      };
       const cleanupSpy = vi
         .spyOn(hostCleanup, "withPluginHostCleanupTimeout")
-        .mockImplementation(async (label, run, timeoutMs) =>
-          withCleanupTimeout(label, run, label === "retained plugin work" ? 1 : timeoutMs),
-        );
-      try {
-        const reloading = rpcReq(socket, "plugins.reload", {
-          plugins: [{ pluginId: "instance-binding-probe" }],
+        .mockImplementation(async (label, run, timeoutMs) => {
+          if (label !== "retained plugin work") {
+            return withCleanupTimeout(label, run, timeoutMs);
+          }
+          await observeQueuedReadiness.promise;
+          return withCleanupTimeout(label, run, 1);
         });
-        await expect
-          .poll(async () => await requestInstanceBindingProbe(runtime), { timeout: 30_000 })
-          .toEqual(before);
+      const reloading = rpcReq(socket, "plugins.reload", {
+        plugins: [{ pluginId: "instance-binding-probe" }],
+      });
+      try {
+        await expect.poll(readGatewayReadiness, { timeout: 30_000 }).toMatchObject({
+          ready: false,
+          failing: ["plugin-reload"],
+          pluginReload: {
+            phase: "reloading",
+            pluginIds: ["instance-binding-probe"],
+            deadlineAtMs: expect.any(Number),
+            reason: expect.stringMatching(/queued behind \d+ retained work/),
+          },
+        });
+        await expect(requestInstanceBindingProbe(runtime)).resolves.toEqual(before);
+        observeQueuedReadiness.resolve();
         const reload = await reloading;
         expect(reload.ok).toBe(false);
         expect(reload.error?.message).toMatch(/admitted work did not settle|active retained work/i);
+        const cleared = await readGatewayReadiness();
+        expect(cleared).toMatchObject({ ready: true, failing: [] });
+        expect(cleared.pluginReload).toBeUndefined();
         await expect(requestInstanceBindingProbe(runtime)).resolves.toEqual(before);
         expect(getActivePluginRegistry()).toBe(registry);
       } finally {
+        observeQueuedReadiness.resolve();
         cleanupSpy.mockRestore();
         releaseWork();
+        await reloading;
       }
     },
   );
