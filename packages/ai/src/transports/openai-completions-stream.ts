@@ -26,6 +26,7 @@ import { notifyLlmRequestActivity } from "../utils/llm-request-activity.js";
 import { createReasoningTagTextPartitioner } from "../utils/reasoning-tag-text-partitioner.js";
 import { withFirstStreamEventTimeout } from "../utils/stream-first-event-timeout.js";
 import { createDeepSeekTextFilter } from "./deepseek-text-filter.js";
+import { hasOpenAICompletionsChunkProgress } from "./openai-completions-chunk-progress.js";
 import {
   createDsmlRecoverer,
   type DeepSeekDsmlRecoveredPart,
@@ -684,42 +685,6 @@ export function shouldEmitOpenAICompletionsReasoning(
   const effort = options?.reasoningEffort ?? options?.reasoning ?? "high";
   if (!effort || !isOpenAICompletionsThinkingEnabled(effort)) {
     return false;
-  }
-  return true;
-}
-
-function hasOpenAICompletionsChunkProgress(chunk: OpenAICompatibleChatCompletionChunk): boolean {
-  if (chunk.usage) {
-    return true;
-  }
-  const choice = Array.isArray(chunk.choices) ? chunk.choices[0] : undefined;
-  if (!choice) {
-    return false;
-  }
-  if (choice.finish_reason || choice.usage) {
-    return true;
-  }
-  const delta = choice.delta ?? choice.message;
-  if (!delta || typeof delta !== "object") {
-    return false;
-  }
-  return Object.entries(delta as Record<string, unknown>).some(
-    ([key, value]) => key !== "role" && hasNonEmptyDeltaValue(value),
-  );
-}
-
-function hasNonEmptyDeltaValue(value: unknown): boolean {
-  if (value === null || value === undefined) {
-    return false;
-  }
-  if (typeof value === "string") {
-    return value.length > 0;
-  }
-  if (Array.isArray(value)) {
-    return value.length > 0;
-  }
-  if (typeof value === "object") {
-    return Object.keys(value).length > 0;
   }
   return true;
 }
