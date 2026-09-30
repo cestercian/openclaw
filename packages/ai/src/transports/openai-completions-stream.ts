@@ -438,9 +438,13 @@ export async function processCompletionsStream(
     if (!rawChunk || typeof rawChunk !== "object") {
       continue;
     }
-    // Hidden reasoning is still provider progress; keep the idle watchdog alive without exposing it.
-    notifyLlmRequestActivity(options?.signal);
     const chunk = rawChunk as OpenAICompatibleChatCompletionChunk;
+    // Hidden reasoning is still provider progress; keep the idle watchdog alive without exposing it.
+    // Content-free keepalive chunks (empty choices, empty deltas) are not progress, otherwise a
+    // stalled provider that keeps the socket chatty would re-arm the idle watchdog forever.
+    if (hasOpenAICompletionsChunkProgress(chunk)) {
+      notifyLlmRequestActivity(options?.signal);
+    }
     output.responseId ||= chunk.id;
     // Retain the provider-returned model when it differs from the requested id so
     // routed/alias responses are not misattributed, matching the direct provider
@@ -680,6 +684,42 @@ export function shouldEmitOpenAICompletionsReasoning(
   const effort = options?.reasoningEffort ?? options?.reasoning ?? "high";
   if (!effort || !isOpenAICompletionsThinkingEnabled(effort)) {
     return false;
+  }
+  return true;
+}
+
+function hasOpenAICompletionsChunkProgress(chunk: OpenAICompatibleChatCompletionChunk): boolean {
+  if (chunk.usage) {
+    return true;
+  }
+  const choice = Array.isArray(chunk.choices) ? chunk.choices[0] : undefined;
+  if (!choice) {
+    return false;
+  }
+  if (choice.finish_reason || choice.usage) {
+    return true;
+  }
+  const delta = choice.delta ?? choice.message;
+  if (!delta || typeof delta !== "object") {
+    return false;
+  }
+  return Object.entries(delta as Record<string, unknown>).some(
+    ([key, value]) => key !== "role" && hasNonEmptyDeltaValue(value),
+  );
+}
+
+function hasNonEmptyDeltaValue(value: unknown): boolean {
+  if (value === null || value === undefined) {
+    return false;
+  }
+  if (typeof value === "string") {
+    return value.length > 0;
+  }
+  if (Array.isArray(value)) {
+    return value.length > 0;
+  }
+  if (typeof value === "object") {
+    return Object.keys(value).length > 0;
   }
   return true;
 }
