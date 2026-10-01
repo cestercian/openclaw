@@ -51,7 +51,7 @@ import { replaceTranscriptEventsSync } from "./session-accessor.sqlite-transcrip
 import { listSessionMembersInDatabase } from "./session-sharing-store.kernel.js";
 import { addSessionMember } from "./session-sharing-store.native.js";
 
-it("creates with prepared label facts, header and atomic owner without host data SQL, then registers under the captured environment", async () => {
+it("creates through an admitted store alias with prepared facts and atomic ownership", async () => {
   await withOpenClawTestState({ scenario: "minimal" }, async (state) => {
     const database = openOpenClawAgentDatabase({ agentId: "main" });
     const key = "agent:main:creation-worker";
