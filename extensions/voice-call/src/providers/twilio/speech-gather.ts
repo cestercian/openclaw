@@ -3,7 +3,7 @@ import { MAX_TIMER_TIMEOUT_MS } from "openclaw/plugin-sdk/number-runtime";
 import { escapeXml } from "../../voice-mapping.js";
 
 /** Twilio defaults to 5s; keep the call alive and re-prompt via Redirect on silence. */
-export const TWILIO_SPEECH_GATHER_TIMEOUT_SEC = 120;
+const TWILIO_SPEECH_GATHER_TIMEOUT_SEC = 120;
 
 /** Same ceiling as the manager hangup timer, in seconds. */
 const MAX_TWILIO_PAUSE_SEC = Math.floor(MAX_TIMER_TIMEOUT_MS / 1000);
