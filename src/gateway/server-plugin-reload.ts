@@ -392,6 +392,10 @@ export async function reloadGatewayPlugins(
     );
     await params.checkpoint?.();
     assertCurrent();
+    const reservedReplacement = replacement;
+    if (!reservedReplacement) {
+      throw new Error("Plugin runtime generation was not reserved before activation");
+    }
     // Publication owns every independent activation tail, even when an earlier one fails.
     const activationErrors: unknown[] = [];
     try {
@@ -416,8 +420,11 @@ export async function reloadGatewayPlugins(
           );
           publishMetadata();
           runtime.pluginMetadataSnapshot = nextMetadata;
-          replacement.commit();
-          kernel.pluginRuntimeGeneration.publishServices(replacement.claim, startedServices);
+          reservedReplacement.commit();
+          kernel.pluginRuntimeGeneration.publishServices(
+            reservedReplacement.claim,
+            startedServices,
+          );
           // Compare handshake descriptors before the prepared credentials replace them.
           // Changed nodes stay invalidated while their connections close.
           for (const client of clients) {
@@ -457,7 +464,7 @@ export async function reloadGatewayPlugins(
       await attempt(activationErrors, () =>
         runtimeState.discovery?.update(
           { gatewayDiscoveryServices: nextRegistry.gatewayDiscoveryServices },
-          replacement.claim,
+          reservedReplacement.claim,
         ),
       );
     }
