@@ -71,21 +71,30 @@ export function createGatewayPluginRuntimeGeneration(params: {
     transientReloadBaseline = undefined;
   };
 
+  const publishReloadStatus = (status: GatewayPluginReloadStatus | undefined) => {
+    if (pending) {
+      return;
+    }
+    if (status === undefined) {
+      closeTransientReload(true);
+      return;
+    }
+    if (!transientReloadActive) {
+      transientReloadBaseline = reloadStatus;
+      transientReloadActive = true;
+    }
+    reloadStatus = status;
+  };
+
   return {
     getReloadStatus: () => reloadStatus,
-    publishReloadStatus: (status: GatewayPluginReloadStatus | undefined) => {
+    publishReloadStatus,
+    reportReloadStatus: (status: GatewayPluginReloadStatus | undefined) => {
       if (pending) {
+        reloadStatus = status;
         return;
       }
-      if (status === undefined) {
-        closeTransientReload(true);
-        return;
-      }
-      if (!transientReloadActive) {
-        transientReloadBaseline = reloadStatus;
-        transientReloadActive = true;
-      }
-      reloadStatus = status;
+      publishReloadStatus(status);
     },
     currentClaim: () => current,
     currentServices: () => params.getServices(),

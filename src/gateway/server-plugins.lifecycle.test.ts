@@ -494,7 +494,7 @@ describe("gateway plugin instance bindings", () => {
       const releaseWork = instance.retainWork();
       const hostCleanup = await import("../plugins/host-hook-cleanup-timeout.js");
       const withCleanupTimeout = hostCleanup.withPluginHostCleanupTimeout;
-      const observeQueuedReadiness = createDeferred<void>();
+      const observeQueuedReadiness = createDeferred();
       const readGatewayReadiness = async () => {
         const response = await fetch(`http://127.0.0.1:${port}/readyz`);
         return await response.json();

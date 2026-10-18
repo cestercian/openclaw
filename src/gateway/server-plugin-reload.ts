@@ -47,7 +47,6 @@ import {
   resolvePluginReloadReplacementIds,
 } from "./server-plugin-reload-recovery.js";
 import { createPluginReloadServices } from "./server-plugin-reload-services.js";
-import type { GatewayPluginReloadStatus } from "./server-plugin-runtime-generation.js";
 import {
   GatewayConfigReloadSupersededError,
   type GatewayReloadHandlerParams,
@@ -180,15 +179,7 @@ export async function reloadGatewayPlugins(
     retainRetirement: (retire) => kernel.pluginMetadata.retire(cache, retire),
   });
   let replacement: ReturnType<typeof kernel.pluginRuntimeGeneration.reserve> | undefined;
-  let stagedReloadStatus: GatewayPluginReloadStatus | undefined;
-  const reportReloadStatus = (status: GatewayPluginReloadStatus | undefined) => {
-    stagedReloadStatus = status;
-    if (replacement) {
-      replacement.setReloadStatus(status);
-      return;
-    }
-    kernel.pluginRuntimeGeneration.publishReloadStatus(status);
-  };
+  const reportReloadStatus = kernel.pluginRuntimeGeneration.reportReloadStatus;
   const assertCurrent = () => {
     drainSignal.throwIfAborted();
     params.assertInvokerOwned?.();
@@ -273,9 +264,6 @@ export async function reloadGatewayPlugins(
     await drainRetainedWork(resourceHandoffIds, drainSignal, reportReloadStatus);
     await checkpoint();
     replacement = kernel.pluginRuntimeGeneration.reserve();
-    if (stagedReloadStatus) {
-      replacement.setReloadStatus(stagedReloadStatus);
-    }
     decisionReplacement = prepareDecisionProviderReload(previousRegistry, changedPluginIds);
     channels.pause();
     quiesceInstances();
@@ -307,12 +295,7 @@ export async function reloadGatewayPlugins(
         (entry) => !changedPluginIds.has(entry.pluginId),
       ),
     });
-    await drainBeforeReplacement(
-      resourceHandoffIds,
-      drainSignal,
-      reportReloadStatus,
-      checkpoint,
-    );
+    await drainBeforeReplacement(resourceHandoffIds, drainSignal, reportReloadStatus, checkpoint);
     await checkpoint();
     reportReloadStatus({ phase: "reloading", pluginIds: [...changedPluginIds] });
     // Channel monitors and services hold long-lived consumers until stop cancels
@@ -381,6 +364,10 @@ export async function reloadGatewayPlugins(
       memoryReplacement.retainedPluginIds,
     );
     await checkpoint();
+    const reservedReplacement = replacement;
+    if (!reservedReplacement) {
+      throw new Error("Plugin runtime generation was not reserved before activation");
+    }
     // Publication owns every independent activation tail, even when an earlier one fails.
     const activationErrors: unknown[] = [];
     try {
@@ -405,8 +392,11 @@ export async function reloadGatewayPlugins(
           );
           publishMetadata();
           runtime.pluginMetadataSnapshot = nextMetadata;
-          replacement.commit();
-          kernel.pluginRuntimeGeneration.publishServices(replacement.claim, startedServices);
+          reservedReplacement.commit();
+          kernel.pluginRuntimeGeneration.publishServices(
+            reservedReplacement.claim,
+            startedServices,
+          );
           // Compare handshake descriptors before the prepared credentials replace them.
           // Changed nodes stay invalidated while their connections close.
           for (const client of clients) {
@@ -452,7 +442,7 @@ export async function reloadGatewayPlugins(
         await attempt(activationErrors, () =>
           runtimeState.discovery?.update(
             { gatewayDiscoveryServices: nextRegistry.gatewayDiscoveryServices },
-            replacement.claim,
+            reservedReplacement.claim,
           ),
         );
       }
@@ -492,7 +482,6 @@ export async function reloadGatewayPlugins(
   } catch (error) {
     if (!replacement) {
       kernel.pluginRuntimeGeneration.publishReloadStatus(undefined);
-      stagedReloadStatus = undefined;
     }
     let failure = includeServiceStopFailure(error);
     const onCleanupFailure = (message: string) => (cleanupError: unknown) => {
