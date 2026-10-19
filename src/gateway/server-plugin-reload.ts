@@ -47,6 +47,7 @@ import {
   resolvePluginReloadReplacementIds,
 } from "./server-plugin-reload-recovery.js";
 import { createPluginReloadServices } from "./server-plugin-reload-services.js";
+import type { GatewayPluginReloadStatus } from "./server-plugin-runtime-generation.js";
 import {
   GatewayConfigReloadSupersededError,
   type GatewayReloadHandlerParams,
@@ -94,7 +95,7 @@ export async function reloadGatewayPlugins(
   } = runtime;
   const previousRegistry = pluginRuntime.registry;
   const previousConfig = getRuntimeConfig();
-  const { pluginRuntimeGeneration } = kernel;
+  const previousServices = kernel.pluginRuntimeGeneration.currentServices();
   const previousMetadata = runtime.pluginMetadataSnapshot;
   const previousLoadContext = getPluginRuntimeLoadContext(previousRegistry);
   const recovery = createPluginReloadRecovery(previousRegistry, preparePlugins);
@@ -179,7 +180,13 @@ export async function reloadGatewayPlugins(
     retainRetirement: (retire) => kernel.pluginMetadata.retire(cache, retire),
   });
   let replacement: ReturnType<typeof kernel.pluginRuntimeGeneration.reserve> | undefined;
-  const reportReloadStatus = kernel.pluginRuntimeGeneration.reportReloadStatus;
+  const reportReloadStatus = (status: GatewayPluginReloadStatus | undefined) => {
+    if (replacement) {
+      replacement.setReloadStatus(status);
+      return;
+    }
+    kernel.pluginRuntimeGeneration.reportReloadStatus(status);
+  };
   const assertCurrent = () => {
     drainSignal.throwIfAborted();
     params.assertInvokerOwned?.();
@@ -295,7 +302,7 @@ export async function reloadGatewayPlugins(
         (entry) => !changedPluginIds.has(entry.pluginId),
       ),
     });
-    await drainBeforeReplacement(resourceHandoffIds, drainSignal, reportReloadStatus, checkpoint);
+    await drainBeforeReplacement(resourceHandoffIds, drainSignal, reportReloadStatus);
     await checkpoint();
     reportReloadStatus({ phase: "reloading", pluginIds: [...changedPluginIds] });
     // Channel monitors and services hold long-lived consumers until stop cancels
@@ -309,11 +316,7 @@ export async function reloadGatewayPlugins(
       resourceHandoffIds.size > 0 || memoryReplacement.restartPluginIds.size > 0;
     const serviceStopIds = new Set([...changedPluginIds, ...memoryReplacement.restartPluginIds]);
     await stopOwner(strictServiceStop, "Plugin service cleanup failed", () =>
-      stopPreviousServices(
-        pluginRuntimeGeneration.currentServices(),
-        strictServiceStop,
-        serviceStopIds,
-      ),
+      stopPreviousServices(previousServices, strictServiceStop, serviceStopIds),
     );
     // Finish admitted work before legacy stop hooks can close shared connections.
     // Removal has no replacement to protect and keeps its bounded, deferred cleanup.
@@ -444,10 +447,9 @@ export async function reloadGatewayPlugins(
           await attempt(activationErrors, () => sidecar.resume(params.nextConfig));
         }
         await attempt(activationErrors, () =>
-          runtimeState.discovery?.update(
-            { gatewayDiscoveryServices: nextRegistry.gatewayDiscoveryServices },
-            reservedReplacement.claim,
-          ),
+          runtimeState.discovery?.update({
+            gatewayDiscoveryServices: nextRegistry.gatewayDiscoveryServices,
+          }),
         );
       }
       await attempt(activationErrors, () =>
@@ -499,7 +501,10 @@ export async function reloadGatewayPlugins(
       let candidateCleanupFailed = false;
       if (candidateServices) {
         // Retained services moved here; shutdown owns them even if recovery cannot run.
-        pluginRuntimeGeneration.setServices(candidateServices);
+        kernel.pluginRuntimeGeneration.publishServices(
+          kernel.pluginRuntimeGeneration.currentClaim(),
+          candidateServices,
+        );
       }
       if (candidateRegistry) {
         try {
@@ -582,7 +587,10 @@ export async function reloadGatewayPlugins(
                   previousConfig,
                   (handle) => {
                     recoveredServices = handle;
-                    pluginRuntimeGeneration.setServices(handle);
+                    kernel.pluginRuntimeGeneration.publishServices(
+                      kernel.pluginRuntimeGeneration.currentClaim(),
+                      handle,
+                    );
                   },
                   memoryReplacement?.restartPluginIds,
                 );

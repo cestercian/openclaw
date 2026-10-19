@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createEmptyPluginRegistry } from "../plugins/registry-empty.js";
 import type { PluginServicesHandle } from "../plugins/services.js";
 import { createPluginRecord } from "../plugins/status.test-helpers.js";
@@ -24,13 +24,9 @@ describe("Gateway plugin runtime generation", () => {
     const recovery = createPluginReloadRecovery(registry, prepareGatewayPluginLoad);
     expect(recovery.capture(selected)).toEqual([]);
     const generation = createOwner();
-    generation.finishReload(
-      undefined,
-      "restored",
-      selected,
-      registry,
-      recovery.unavailablePluginIds,
-    );
+    const rejected = generation.reserve();
+    rejected.reject();
+    rejected.finishReload("restored", selected, registry, recovery.unavailablePluginIds);
     expect(generation.getReloadStatus()).toBeUndefined();
   });
 
@@ -141,5 +137,27 @@ describe("Gateway plugin runtime generation", () => {
     admitted.finishReload("unchanged", new Set(), createEmptyPluginRegistry(), new Set());
     expect(serving.isCurrent()).toBe(true);
     expect(owner.getReloadStatus()).toEqual({ phase: "failed", pluginIds: ["prior"] });
+  });
+
+  it("keeps a failed plugin listed after reserved recovery reports and a later applied sibling reload", () => {
+    const owner = createOwner();
+    const first = owner.reserve();
+    first.setReloadStatus({ phase: "reloading", pluginIds: ["first"] });
+    first.reject();
+    owner.reportReloadStatus({ phase: "recovering", pluginIds: ["first"] });
+    first.finishReload("failed", new Set(["first"]), createEmptyPluginRegistry(), new Set());
+    expect(owner.getReloadStatus()).toMatchObject({
+      phase: "failed",
+      pluginIds: ["first"],
+    });
+
+    owner.reportReloadStatus({ phase: "reloading", pluginIds: ["sibling"] });
+    const sibling = owner.reserve();
+    sibling.commit();
+    sibling.finishReload("applied", new Set(["sibling"]), createEmptyPluginRegistry(), new Set());
+    expect(owner.getReloadStatus()).toMatchObject({
+      phase: "failed",
+      pluginIds: ["first"],
+    });
   });
 });

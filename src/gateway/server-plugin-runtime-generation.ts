@@ -1,13 +1,24 @@
 import { getPluginInstance } from "../plugins/plugin-instance-scope.js";
 import type { PluginRegistry } from "../plugins/registry-types.js";
 import type { PluginServicesHandle } from "../plugins/services.js";
+import { createDeferredCore } from "../shared/deferred.js";
 import type { GatewayPluginReloadStatus } from "./server-plugin-reload-status.types.js";
 
-/** Plugin service publication and operator-visible reload diagnostics. */
+export type { GatewayPluginReloadStatus } from "./server-plugin-reload-status.types.js";
+
+export type GatewayPluginRuntimeClaim = Readonly<{
+  isCurrent: () => boolean;
+  waitForUnblocked: () => Promise<boolean>;
+  publish: (publication: () => void) => boolean;
+}>;
+
+/** One Gateway owner fences every plugin publication across startup and hot replacement. */
 export function createGatewayPluginRuntimeGeneration(params: {
   getServices: () => PluginServicesHandle | null;
   setServices: (services: PluginServicesHandle | null) => void;
 }) {
+  let current: GatewayPluginRuntimeClaim;
+  let latestReservation: GatewayPluginRuntimeClaim | undefined;
   let reloadStatus: GatewayPluginReloadStatus | undefined;
   // Queued status before admission is an overlay. Readiness can see it while the
   // serving claim stays current. A later reservation snapshots the pre-overlay
@@ -83,6 +94,9 @@ export function createGatewayPluginRuntimeGeneration(params: {
     },
     currentClaim: () => current,
     currentServices: () => params.getServices(),
+    setServices: (services: PluginServicesHandle | null) => {
+      params.setServices(services);
+    },
     publishServices: (claim: GatewayPluginRuntimeClaim, services: PluginServicesHandle | null) =>
       claim.publish(() => params.setServices(services)),
     reserve: () => {
@@ -123,6 +137,9 @@ export function createGatewayPluginRuntimeGeneration(params: {
           if (latestReservation !== reservation.claim) {
             return;
           }
+          // Recovery reports after reject are not queued admission. Close any
+          // leftover overlay so this outcome is the status a later reload snapshots.
+          closeTransientReload(false);
           if (outcome === "unchanged") {
             reloadStatus = previousReloadStatus;
             return;
@@ -139,35 +156,35 @@ export function createGatewayPluginRuntimeGeneration(params: {
                     )
                     .map((record) => record.id),
                 )
-                .map((record) => record.id),
-            )
-          : pluginIds;
-      const failedIds = new Set(
-        previousReloadStatus?.phase === "failed"
-          ? previousReloadStatus.pluginIds.filter(
-              (id) => !pluginIds.has(id) || !restoredIds.has(id),
-            )
-          : [],
-      );
-      for (const id of pluginIds) {
-        if (
-          outcome === "failed" ||
-          (outcome === "restored" && unavailablePluginIds.has(id) && !restoredIds.has(id))
-        ) {
-          failedIds.add(id);
-        }
-      }
-      reloadStatus = failedIds.size
-        ? {
-            phase: "failed",
-            pluginIds: [...failedIds].toSorted(),
-            reason:
-              "Plugin activation or recovery failed. Retry openclaw plugins reload <id> after admitted work settles, or restart the Gateway. Inspect the Gateway log for the failure.",
+              : pluginIds;
+          const failedIds = new Set(
+            previousReloadStatus?.phase === "failed"
+              ? previousReloadStatus.pluginIds.filter(
+                  (id) => !pluginIds.has(id) || !restoredIds.has(id),
+                )
+              : [],
+          );
+          for (const id of pluginIds) {
+            if (
+              outcome === "failed" ||
+              (outcome === "restored" && unavailablePluginIds.has(id) && !restoredIds.has(id))
+            ) {
+              failedIds.add(id);
+            }
           }
-        : undefined;
-      if (outcome === "failed" && reloadStatus?.reason) {
-        reportFailure?.(reloadStatus.reason);
-      }
+          reloadStatus = failedIds.size
+            ? {
+                phase: "failed",
+                pluginIds: [...failedIds].toSorted(),
+                reason:
+                  "Plugin activation or recovery failed. Retry openclaw plugins reload <id> after admitted work settles, or restart the Gateway. Inspect the Gateway log for the failure.",
+              }
+            : undefined;
+          if (outcome === "failed" && reloadStatus?.reason) {
+            reportFailure?.(reloadStatus.reason);
+          }
+        },
+      });
     },
   };
 }

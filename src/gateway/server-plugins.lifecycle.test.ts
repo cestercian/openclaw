@@ -1,6 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { afterEach, describe, expect, it, onTestFinished as registerTestCleanup, vi } from "vitest";
+import { waitForGatewayStartup } from "../../test/helpers/gateway-startup.js";
 import { createDeferred } from "../../test/helpers/promise.js";
 import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
 import * as configFileSource from "../config/source-file.js";
@@ -482,6 +483,7 @@ describe("gateway plugin instance bindings", () => {
       const { coordinator } = await prepareBinding();
       const { server, port } = await startServer({ sidecarStartup: "start" });
       await server.startupSettled;
+      await waitForGatewayStartup(port);
       const socket = await connectAdmin(port);
 
       const registry = getActivePluginRegistry();
