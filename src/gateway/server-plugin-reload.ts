@@ -47,6 +47,7 @@ import {
   resolvePluginReloadReplacementIds,
 } from "./server-plugin-reload-recovery.js";
 import { createPluginReloadServices } from "./server-plugin-reload-services.js";
+import type { GatewayPluginReloadStatus } from "./server-plugin-runtime-generation.js";
 import {
   GatewayConfigReloadSupersededError,
   type GatewayReloadHandlerParams,
@@ -179,7 +180,13 @@ export async function reloadGatewayPlugins(
     retainRetirement: (retire) => kernel.pluginMetadata.retire(cache, retire),
   });
   let replacement: ReturnType<typeof kernel.pluginRuntimeGeneration.reserve> | undefined;
-  const reportReloadStatus = kernel.pluginRuntimeGeneration.reportReloadStatus;
+  const reportReloadStatus = (status: GatewayPluginReloadStatus | undefined) => {
+    if (replacement) {
+      replacement.setReloadStatus(status);
+      return;
+    }
+    kernel.pluginRuntimeGeneration.reportReloadStatus(status);
+  };
   const assertCurrent = () => {
     drainSignal.throwIfAborted();
     params.assertInvokerOwned?.();

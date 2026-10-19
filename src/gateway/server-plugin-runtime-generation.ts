@@ -138,6 +138,9 @@ export function createGatewayPluginRuntimeGeneration(params: {
           if (latestReservation !== reservation.claim) {
             return;
           }
+          // Recovery reports after reject are not queued admission. Close any
+          // leftover overlay so this outcome is the status a later reload snapshots.
+          closeTransientReload(false);
           if (outcome === "unchanged") {
             reloadStatus = previousReloadStatus;
             return;

@@ -138,4 +138,26 @@ describe("Gateway plugin runtime generation", () => {
     expect(serving.isCurrent()).toBe(true);
     expect(owner.getReloadStatus()).toEqual({ phase: "failed", pluginIds: ["prior"] });
   });
+
+  it("keeps a failed plugin listed after reserved recovery reports and a later applied sibling reload", () => {
+    const owner = createOwner();
+    const first = owner.reserve();
+    first.setReloadStatus({ phase: "reloading", pluginIds: ["first"] });
+    first.reject();
+    owner.reportReloadStatus({ phase: "recovering", pluginIds: ["first"] });
+    first.finishReload("failed", new Set(["first"]), createEmptyPluginRegistry(), new Set());
+    expect(owner.getReloadStatus()).toMatchObject({
+      phase: "failed",
+      pluginIds: ["first"],
+    });
+
+    owner.reportReloadStatus({ phase: "reloading", pluginIds: ["sibling"] });
+    const sibling = owner.reserve();
+    sibling.commit();
+    sibling.finishReload("applied", new Set(["sibling"]), createEmptyPluginRegistry(), new Set());
+    expect(owner.getReloadStatus()).toMatchObject({
+      phase: "failed",
+      pluginIds: ["first"],
+    });
+  });
 });
