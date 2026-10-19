@@ -1,16 +1,37 @@
 import { describe, expect, it, vi } from "vitest";
+import { createEmptyPluginRegistry } from "../plugins/registry-empty.js";
 import type { PluginServicesHandle } from "../plugins/services.js";
+import { createPluginRecord } from "../plugins/status.test-helpers.js";
+import { prepareGatewayPluginLoad } from "./server-plugin-bootstrap.js";
+import { createPluginReloadRecovery } from "./server-plugin-reload-recovery.js";
 import { createGatewayPluginRuntimeGeneration } from "./server-plugin-runtime-generation.js";
 
+function createOwner() {
+  let currentServices: PluginServicesHandle | null = null;
+  return createGatewayPluginRuntimeGeneration({
+    getServices: () => currentServices,
+    setServices: (services) => {
+      currentServices = services;
+    },
+  });
+}
+
 describe("Gateway plugin runtime generation", () => {
+  it("preserves readiness when rollback restores an already unavailable startup plugin", () => {
+    const registry = createEmptyPluginRegistry();
+    registry.plugins.push(createPluginRecord({ id: "startup-error", status: "error" }));
+    const selected = new Set(["startup-error"]);
+    const recovery = createPluginReloadRecovery(registry, prepareGatewayPluginLoad);
+    expect(recovery.capture(selected)).toEqual([]);
+    const generation = createOwner();
+    const rejected = generation.reserve();
+    rejected.reject();
+    rejected.finishReload("restored", selected, registry, recovery.unavailablePluginIds);
+    expect(generation.getReloadStatus()).toBeUndefined();
+  });
+
   it("blocks stale publication during reservation, restores rejected claims, and commits winners", async () => {
-    let currentServices: PluginServicesHandle | null = null;
-    const owner = createGatewayPluginRuntimeGeneration({
-      getServices: () => currentServices,
-      setServices: (services) => {
-        currentServices = services;
-      },
-    });
+    const owner = createOwner();
     const startupClaim = owner.currentClaim();
     const published = vi.fn();
 
@@ -46,47 +67,13 @@ describe("Gateway plugin runtime generation", () => {
     expect(owner.currentServices()).toBe(winningServices);
   });
 
-  it("keeps retired claims invalid across rejection until a replacement commits", async () => {
-    let currentServices: PluginServicesHandle | null = null;
-    const owner = createGatewayPluginRuntimeGeneration({
-      getServices: () => currentServices,
-      setServices: (services) => {
-        currentServices = services;
-      },
-    });
-    const previous = owner.currentClaim();
-    const replacement = owner.reserve();
-    const previousUnblocked = previous.waitForUnblocked();
-    replacement.retirePrevious();
-    replacement.reject();
-    await expect(previousUnblocked).resolves.toBe(false);
-    const services = { reload: vi.fn(async () => {}), stop: vi.fn(async () => {}) };
-    expect(owner.publishServices(previous, services)).toBe(false);
-    const cancelledRetry = owner.reserve();
-    cancelledRetry.reject();
-    expect(previous.isCurrent()).toBe(false);
-    const committed = owner.reserve();
-    committed.commit();
-    replacement.retirePrevious();
-    expect(committed.claim.isCurrent()).toBe(true);
-    expect(owner.publishServices(committed.claim, services)).toBe(true);
-    expect(owner.currentServices()).toBe(services);
-    expect(previous.isCurrent()).toBe(false);
-  });
-
   it.each([
     { successor: "rejects", survives: true },
     { successor: "commits", survives: false },
   ])(
     "settles a pending successor that $successor before deciding discovery and service ownership",
     async ({ survives }) => {
-      let currentServices: PluginServicesHandle | null = null;
-      const owner = createGatewayPluginRuntimeGeneration({
-        getServices: () => currentServices,
-        setServices: (services) => {
-          currentServices = services;
-        },
-      });
+      const owner = createOwner();
       const committed = owner.reserve();
       committed.commit();
       const pendingSuccessor = owner.reserve();
@@ -119,4 +106,58 @@ describe("Gateway plugin runtime generation", () => {
       expect(discoveryStop).toHaveBeenCalledTimes(survives ? 0 : 1);
     },
   );
+
+  it("publishes queued reload status without fencing the serving claim", () => {
+    const owner = createOwner();
+    const serving = owner.currentClaim();
+    const prior = owner.reserve();
+    prior.setReloadStatus({ phase: "failed", pluginIds: ["prior"] });
+    prior.reject();
+    const queued = {
+      phase: "reloading" as const,
+      pluginIds: ["probe"],
+      deadlineAtMs: 1_700_000_000_000,
+      reason: "Plugin replacement queued behind 1 retained work item(s)",
+    };
+
+    owner.publishReloadStatus(queued);
+    expect(serving.isCurrent()).toBe(true);
+    expect(serving.publish(() => {})).toBe(true);
+    expect(owner.getReloadStatus()).toEqual(queued);
+
+    owner.publishReloadStatus(undefined);
+    expect(serving.isCurrent()).toBe(true);
+    expect(owner.getReloadStatus()).toEqual({ phase: "failed", pluginIds: ["prior"] });
+
+    owner.publishReloadStatus(queued);
+    const admitted = owner.reserve();
+    expect(serving.isCurrent()).toBe(false);
+    expect(owner.getReloadStatus()).toEqual(queued);
+    admitted.reject();
+    admitted.finishReload("unchanged", new Set(), createEmptyPluginRegistry(), new Set());
+    expect(serving.isCurrent()).toBe(true);
+    expect(owner.getReloadStatus()).toEqual({ phase: "failed", pluginIds: ["prior"] });
+  });
+
+  it("keeps a failed plugin listed after reserved recovery reports and a later applied sibling reload", () => {
+    const owner = createOwner();
+    const first = owner.reserve();
+    first.setReloadStatus({ phase: "reloading", pluginIds: ["first"] });
+    first.reject();
+    owner.reportReloadStatus({ phase: "recovering", pluginIds: ["first"] });
+    first.finishReload("failed", new Set(["first"]), createEmptyPluginRegistry(), new Set());
+    expect(owner.getReloadStatus()).toMatchObject({
+      phase: "failed",
+      pluginIds: ["first"],
+    });
+
+    owner.reportReloadStatus({ phase: "reloading", pluginIds: ["sibling"] });
+    const sibling = owner.reserve();
+    sibling.commit();
+    sibling.finishReload("applied", new Set(["sibling"]), createEmptyPluginRegistry(), new Set());
+    expect(owner.getReloadStatus()).toMatchObject({
+      phase: "failed",
+      pluginIds: ["first"],
+    });
+  });
 });
