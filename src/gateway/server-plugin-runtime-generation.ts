@@ -1,17 +1,15 @@
+import { getPluginInstance } from "../plugins/plugin-instance-scope.js";
+import type { PluginRegistry } from "../plugins/registry-types.js";
 import type { PluginServicesHandle } from "../plugins/services.js";
 import { createDeferredCore } from "../shared/deferred.js";
+import type { GatewayPluginReloadStatus } from "./server-plugin-reload-status.types.js";
+
+export type { GatewayPluginReloadStatus } from "./server-plugin-reload-status.types.js";
 
 export type GatewayPluginRuntimeClaim = Readonly<{
   isCurrent: () => boolean;
   waitForUnblocked: () => Promise<boolean>;
   publish: (publication: () => void) => boolean;
-}>;
-
-type GatewayPluginRuntimeReservation = Readonly<{
-  claim: GatewayPluginRuntimeClaim;
-  retirePrevious: () => void;
-  commit: () => void;
-  reject: () => void;
 }>;
 
 /** One Gateway owner fences every plugin publication across startup and hot replacement. */
@@ -20,7 +18,13 @@ export function createGatewayPluginRuntimeGeneration(params: {
   setServices: (services: PluginServicesHandle | null) => void;
 }) {
   let current: GatewayPluginRuntimeClaim;
-  let retired = false;
+  let latestReservation: GatewayPluginRuntimeClaim | undefined;
+  let reloadStatus: GatewayPluginReloadStatus | undefined;
+  // Queued status before admission is an overlay. Readiness can see it while the
+  // serving claim stays current. A later reservation snapshots the pre-overlay
+  // status so refusal restores that status instead of keeping the queue.
+  let transientReloadBaseline: GatewayPluginReloadStatus | undefined;
+  let transientReloadActive = false;
   let pending:
     | {
         claim: GatewayPluginRuntimeClaim;
@@ -30,7 +34,7 @@ export function createGatewayPluginRuntimeGeneration(params: {
 
   const createClaim = (): GatewayPluginRuntimeClaim => {
     const claim: GatewayPluginRuntimeClaim = Object.freeze({
-      isCurrent: () => current === claim && pending === undefined && !retired,
+      isCurrent: () => current === claim && pending === undefined,
       waitForUnblocked: async () => {
         for (;;) {
           const reservation = pending;
@@ -52,16 +56,60 @@ export function createGatewayPluginRuntimeGeneration(params: {
   };
   current = createClaim();
 
+  const closeTransientReload = (restore: boolean) => {
+    if (!transientReloadActive) {
+      return;
+    }
+    if (restore) {
+      reloadStatus = transientReloadBaseline;
+    }
+    transientReloadActive = false;
+    transientReloadBaseline = undefined;
+  };
+
+  const publishReloadStatus = (status: GatewayPluginReloadStatus | undefined) => {
+    if (pending) {
+      return;
+    }
+    if (status === undefined) {
+      closeTransientReload(true);
+      return;
+    }
+    if (!transientReloadActive) {
+      transientReloadBaseline = reloadStatus;
+      transientReloadActive = true;
+    }
+    reloadStatus = status;
+  };
+
   return {
+    getReloadStatus: () => reloadStatus,
+    setReloadStatus: (status: GatewayPluginReloadStatus | undefined) => {
+      reloadStatus = status;
+    },
+    publishReloadStatus,
+    reportReloadStatus: (status: GatewayPluginReloadStatus | undefined) => {
+      if (pending) {
+        reloadStatus = status;
+        return;
+      }
+      publishReloadStatus(status);
+    },
     currentClaim: () => current,
     currentServices: () => params.getServices(),
+    setServices: (services: PluginServicesHandle | null) => {
+      params.setServices(services);
+    },
     publishServices: (claim: GatewayPluginRuntimeClaim, services: PluginServicesHandle | null) =>
       claim.publish(() => params.setServices(services)),
-    reserve: (): GatewayPluginRuntimeReservation => {
+    reserve: () => {
       if (pending) {
         throw new Error("a Gateway plugin runtime replacement is already pending");
       }
       const reservation = { claim: createClaim(), settled: createDeferredCore() };
+      const previousReloadStatus = transientReloadActive ? transientReloadBaseline : reloadStatus;
+      closeTransientReload(false);
+      latestReservation = reservation.claim;
       pending = reservation;
       const settle = (accepted: boolean) => {
         if (pending !== reservation) {
@@ -69,21 +117,76 @@ export function createGatewayPluginRuntimeGeneration(params: {
         }
         if (accepted) {
           current = reservation.claim;
-          retired = false;
         }
         pending = undefined;
         reservation.settled.resolve();
       };
       return Object.freeze({
         claim: reservation.claim,
-        retirePrevious: () => {
-          // Service teardown is irreversible even when the replacement is rejected.
-          if (pending === reservation) {
-            retired = true;
-          }
-        },
         commit: () => settle(true),
         reject: () => settle(false),
+        setReloadStatus: (status: GatewayPluginReloadStatus | undefined) => {
+          if (latestReservation === reservation.claim) {
+            reloadStatus = status;
+          }
+        },
+        finishReload: (
+          outcome: "applied" | "restored" | "failed" | "unchanged",
+          pluginIds: ReadonlySet<string>,
+          registry: PluginRegistry,
+          unavailablePluginIds: ReadonlySet<string>,
+          reportFailure?: (reason: string) => void,
+        ) => {
+          if (latestReservation !== reservation.claim) {
+            return;
+          }
+          // Recovery reports after reject are not queued admission. Close any
+          // leftover overlay so this outcome is the status a later reload snapshots.
+          closeTransientReload(false);
+          if (outcome === "unchanged") {
+            reloadStatus = previousReloadStatus;
+            return;
+          }
+          // Recovery can omit previously retired owners whose captured code is gone.
+          const restoredIds =
+            outcome === "restored"
+              ? new Set(
+                  registry.plugins
+                    .filter(
+                      (record) =>
+                        record.status === "loaded" &&
+                        (record.format === "bundle" || getPluginInstance(record)?.acceptingCalls),
+                    )
+                    .map((record) => record.id),
+                )
+              : pluginIds;
+          const failedIds = new Set(
+            previousReloadStatus?.phase === "failed"
+              ? previousReloadStatus.pluginIds.filter(
+                  (id) => !pluginIds.has(id) || !restoredIds.has(id),
+                )
+              : [],
+          );
+          for (const id of pluginIds) {
+            if (
+              outcome === "failed" ||
+              (outcome === "restored" && unavailablePluginIds.has(id) && !restoredIds.has(id))
+            ) {
+              failedIds.add(id);
+            }
+          }
+          reloadStatus = failedIds.size
+            ? {
+                phase: "failed",
+                pluginIds: [...failedIds].toSorted(),
+                reason:
+                  "Plugin activation or recovery failed. Retry openclaw plugins reload <id> after admitted work settles, or restart the Gateway. Inspect the Gateway log for the failure.",
+              }
+            : undefined;
+          if (outcome === "failed" && reloadStatus?.reason) {
+            reportFailure?.(reloadStatus.reason);
+          }
+        },
       });
     },
   };
