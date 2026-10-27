@@ -84,6 +84,9 @@ export function createGatewayPluginRuntimeGeneration(params: {
 
   return {
     getReloadStatus: () => reloadStatus,
+    setReloadStatus: (status: GatewayPluginReloadStatus | undefined) => {
+      reloadStatus = status;
+    },
     publishReloadStatus,
     reportReloadStatus: (status: GatewayPluginReloadStatus | undefined) => {
       if (pending) {
