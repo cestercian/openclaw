@@ -1,9 +1,13 @@
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
-import type { WorkerProjectPreparationIdentity } from "./preparation-identity.js";
+import type { WorkerProjectPreparationIdentity } from "./preparation-identity.schema.js";
 import { createWorkerProjectPreparation } from "./project-preparation.js";
 import { prepareRepositoryWorkerProjectSource } from "./repository-project-admission.js";
 import type { WorkerEnvironmentRecord } from "./store.js";
 import type { WorkerProjectSnapshot } from "./workspace-git-base.js";
+
+export type WorkerProviderRepositorySource = Awaited<
+  ReturnType<typeof prepareRepositoryWorkerProjectSource>
+>;
 
 export async function prepareWorkerProviderProject(params: {
   project: WorkerProjectSnapshot;
@@ -13,32 +17,36 @@ export async function prepareWorkerProviderProject(params: {
   getConfig: () => OpenClawConfig;
   requireCurrent: () => void;
   signal?: AbortSignal;
+  repositorySource?: WorkerProviderRepositorySource;
 }) {
   const { project, preparation, record } = params;
   const repository =
     "source" in project
-      ? await prepareRepositoryWorkerProjectSource({
+      ? (params.repositorySource ??
+        (await prepareRepositoryWorkerProjectSource({
           expected: project,
           namespace: params.namespace,
           getConfig: params.getConfig,
           assertCurrent: params.requireCurrent,
           signal: params.signal,
           knownRecipe: preparation
-            ? () => ({ project, setupRecipe: preparation.setupRecipe })
+            ? () => ({ setupRecipe: preparation.setupRecipe, recipe: preparation.recipe })
             : undefined,
-        })
+        })))
       : undefined;
   params.requireCurrent();
-  if ("source" in project && !repository) {
-    throw new Error("Prepared repository is no longer public");
-  }
   if (repository && preparation && repository.setupRecipe !== preparation.setupRecipe) {
     throw new Error("Prepared repository recipe no longer matches its admission");
   }
   return createWorkerProjectPreparation({
     project,
     namespace: params.namespace,
-    ...(repository ? { revalidateRepositorySource: repository.revalidate } : {}),
+    ...(repository
+      ? {
+          revalidateRepositorySource: repository.revalidate,
+          prepareRepositoryGitPack: repository.prepareGitPack,
+        }
+      : {}),
     preparation: preparation
       ? {
           ...preparation,

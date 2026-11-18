@@ -1,5 +1,5 @@
 {
-  "startupJsGzipBytes": 352531,
-  "reason": "Plugin discovery shell adds the canonical /plugins workspace route and navigation metadata; measured 352531 B startup gzip on Linux-equivalent local build. Fixed 358400 B cap retained.",
-  "updatedAt": "2026-09-09"
+  "startupJsGzipBytes": 91561,
+  "reason": "PR #195865 (L310): warm cached-page reveal latch in startup boot owners; lead byte exception",
+  "updatedAt": "2026-11-09"
 }

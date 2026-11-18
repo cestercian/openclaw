@@ -4,7 +4,7 @@ import type { PluginOrigin } from "./plugin-origin.types.js";
 type PluginHookPolicy = PluginEntryConfig["hooks"];
 
 export function resolvePromptInjectionAllowed(policy?: PluginHookPolicy): boolean {
-  return policy?.allowPromptInjection !== false;
+  return policy?.allowPromptModification !== false;
 }
 
 export function resolveConversationAccessAllowed(
@@ -14,4 +14,9 @@ export function resolveConversationAccessAllowed(
   return origin === "bundled"
     ? policy?.allowConversationAccess !== false
     : policy?.allowConversationAccess === true;
+}
+
+/** Final provider request rewriting is never implied, even for bundled plugins. */
+export function resolveModelRequestAllowed(policy?: PluginHookPolicy): boolean {
+  return policy?.allowModelRequest === true;
 }
